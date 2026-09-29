@@ -1,10 +1,25 @@
 import { randomBytes } from "node:crypto";
 import type { Logger } from "pino";
 
+export interface QuoteTerms {
+  srcChain: "ethereum" | "stellar";
+  srcAsset: string;
+  srcAmount: string;
+  dstChain: "ethereum" | "stellar";
+  dstAsset: string;
+  dstAmount: string;
+}
+
 export interface PriceQuote {
   /** Stable opaque id that callers can reference back to this exact quote. */
   quoteId: string;
   pair: string;
+  srcChain: QuoteTerms["srcChain"];
+  srcAsset: string;
+  srcAmount: string;
+  dstChain: QuoteTerms["dstChain"];
+  dstAsset: string;
+  dstAmount: string;
   /** Decimal string. `srcUsd` and `dstUsd` are USD per unit of src/dst. */
   srcUsd: string | null;
   dstUsd: string | null;
@@ -34,6 +49,13 @@ export class QuoteNotFoundError extends Error {
   }
 }
 
+export class QuoteTermsMismatchError extends Error {
+  constructor(public readonly quoteId: string) {
+    super(`Order terms do not match quote ${quoteId}`);
+    this.name = "QuoteTermsMismatchError";
+  }
+}
+
 /**
  * Minimal real-data price service. Reads from CoinGecko's free
  * (no-API-key) endpoint; if the call fails we surface a `null` price
@@ -49,7 +71,7 @@ export class QuoteService {
   /** In-flight / recently-issued quotes, keyed by quoteId. */
   private readonly quotes = new Map<string, PriceQuote>();
   /** Cached CoinGecko response, keyed by pair name. */
-  private readonly priceCache = new Map<string, PriceQuote>();
+  private readonly priceCache = new Map<string, { srcUsd: string | null; dstUsd: string | null; expiresAt: number }>();
   private readonly cacheTtlMs = 30_000;
 
   constructor(
@@ -67,21 +89,10 @@ export class QuoteService {
    * The returned object always has a unique `quoteId` so callers
    * can reference it when announcing an order.
    */
-  async quoteEthXlm(): Promise<PriceQuote> {
+  async quoteEthXlm(terms: QuoteTerms): Promise<PriceQuote> {
     const cached = this.priceCache.get("ETH-XLM");
     if (cached && this.now() < cached.expiresAt) {
-      // Re-issue a *new* quoteId that shares the same price data.
-      // This ensures each API response has a distinct, trackable id
-      // while still benefiting from the price cache.
-      const reissued: PriceQuote = {
-        ...cached,
-        quoteId: this.newQuoteId(),
-        source: "cache",
-        issuedAt: this.now()
-      };
-      this.quotes.set(reissued.quoteId, reissued);
-      this.log.debug({ quoteId: reissued.quoteId, pair: "ETH-XLM" }, "quote reissued from cache");
-      return reissued;
+      return this.issueQuote(terms, cached.srcUsd, cached.dstUsd, "cache", cached.expiresAt);
     }
 
     let ethUsd: string | null = null;
@@ -102,24 +113,10 @@ export class QuoteService {
       this.log.warn({ err }, "coingecko quote failed — returning null prices");
     }
 
-    const quoteId = this.newQuoteId();
     const issuedAt = this.now();
     const expiresAt = issuedAt + this.cacheTtlMs;
-
-    const quote: PriceQuote = {
-      quoteId,
-      pair: "ETH-XLM",
-      srcUsd: ethUsd,
-      dstUsd: xlmUsd,
-      source,
-      issuedAt,
-      expiresAt
-    };
-
-    this.priceCache.set("ETH-XLM", quote);
-    this.quotes.set(quoteId, quote);
-    this.log.debug({ quoteId, source }, "quote issued");
-    return quote;
+    this.priceCache.set("ETH-XLM", { srcUsd: ethUsd, dstUsd: xlmUsd, expiresAt });
+    return this.issueQuote(terms, ethUsd, xlmUsd, source, expiresAt, issuedAt);
   }
 
   /**
@@ -156,6 +153,21 @@ export class QuoteService {
     return quote;
   }
 
+  assertMatches(quoteId: string, terms: QuoteTerms): PriceQuote {
+    const quote = this.assertFresh(quoteId);
+    if (
+      quote.srcChain !== terms.srcChain ||
+      quote.srcAsset !== terms.srcAsset ||
+      quote.srcAmount !== terms.srcAmount ||
+      quote.dstChain !== terms.dstChain ||
+      quote.dstAsset !== terms.dstAsset ||
+      quote.dstAmount !== terms.dstAmount
+    ) {
+      throw new QuoteTermsMismatchError(quoteId);
+    }
+    return quote;
+  }
+
   /**
    * Remove all quotes whose `expiresAt` is in the past.
    * Called periodically to prevent unbounded memory growth.
@@ -181,5 +193,28 @@ export class QuoteService {
 
   private newQuoteId(): string {
     return randomBytes(16).toString("hex");
+  }
+
+  private issueQuote(
+    terms: QuoteTerms,
+    srcUsd: string | null,
+    dstUsd: string | null,
+    source: PriceQuote["source"],
+    expiresAt: number,
+    issuedAt = this.now()
+  ): PriceQuote {
+    const quote: PriceQuote = {
+      ...terms,
+      quoteId: this.newQuoteId(),
+      pair: "ETH-XLM",
+      srcUsd,
+      dstUsd,
+      source,
+      issuedAt,
+      expiresAt
+    };
+    this.quotes.set(quote.quoteId, quote);
+    this.log.debug({ quoteId: quote.quoteId, source }, "quote issued");
+    return quote;
   }
 }
