@@ -51,7 +51,8 @@ export function quotesRoutes(quotes: QuoteService): Router {
         issuedAt: quote.issuedAt,
         expiresAt: quote.expiresAt,
         freshMs: quote.expiresAt - Date.now(),
-        source: quote.source
+        source: quote.source,
+        ...quote.terms
       });
     } catch (err) {
       if (err instanceof QuoteExpiredError) {

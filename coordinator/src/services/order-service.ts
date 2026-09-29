@@ -148,7 +148,13 @@ export class OrderService {
         this.log.debug({ quoteId: input.quoteId }, "quoteId supplied but no QuoteService wired; skipping freshness check");
       } else {
         try {
-          this.quoteService.assertFresh(input.quoteId);
+          this.quoteService.bindOrderTerms(input.quoteId, {
+            fromAsset: input.srcAsset,
+            toAsset: input.dstAsset,
+            amount: input.srcAmount,
+            fromNetwork: input.srcChain,
+            toNetwork: input.dstChain
+          });
           this.log.debug({ quoteId: input.quoteId }, "quote freshness confirmed");
         } catch (err) {
           if (err instanceof QuoteExpiredError || err instanceof QuoteNotFoundError) {

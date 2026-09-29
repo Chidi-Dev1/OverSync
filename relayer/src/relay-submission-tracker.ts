@@ -154,6 +154,17 @@ export class RelayInFlightError extends Error {
   }
 }
 
+/** A deterministic refusal that must never be retried. */
+export class RelayRefusalError extends Error {
+  readonly code: string;
+
+  constructor(code: string) {
+    super(code);
+    this.name = 'RelayRefusalError';
+    this.code = code;
+  }
+}
+
 const DEFAULTS = {
   maxAttempts: 3,
   timeoutMs: 30_000,
@@ -326,7 +337,7 @@ export class RelaySubmissionTracker {
         return { status: 'succeeded', result, record, duplicate: false };
       } catch (err) {
         record.lastError = errorMessage(err);
-        const retryable = this.cfg.isRetryable(err);
+        const retryable = !(err instanceof RelayRefusalError) && this.cfg.isRetryable(err);
         const budgetLeft = record.attempts < this.cfg.maxAttempts;
 
         if (retryable && budgetLeft) {

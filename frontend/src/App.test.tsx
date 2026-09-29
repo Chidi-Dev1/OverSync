@@ -7,6 +7,18 @@ vi.mock('./config/networks', () => ({
   isMainnetEnabled: vi.fn(() => false),
   isTestnet: vi.fn(() => true),
   resolveNetworkMode: vi.fn((requested: string) => requested),
+  getCurrentNetwork: vi.fn(() => ({
+    ethereum: { explorerUrl: 'https://sepolia.etherscan.io' },
+    stellar: { explorerUrl: 'https://testnet.stellarchain.io' },
+  })),
+  getContractAddresses: vi.fn(() => ({
+    ethereum: {
+      htlcBridge: '0x1111111111111111111111111111111111111111',
+      escrowFactory: '0x2222222222222222222222222222222222222222',
+      testToken: '0x3333333333333333333333333333333333333333',
+    },
+    stellar: {},
+  })),
 }));
 
 vi.mock('./lib/useNetworkMode', () => ({

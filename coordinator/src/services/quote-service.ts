@@ -14,6 +14,14 @@ export interface PriceQuote {
   issuedAt: number;
   /** Unix ms after which this quote must not be used to fill an order. */
   expiresAt: number;
+  /** Order terms accepted with this quote, when it has been used to announce an order. */
+  terms?: {
+    fromAsset: string;
+    toAsset: string;
+    amount: string;
+    fromNetwork: string;
+    toNetwork: string;
+  };
 }
 
 export class QuoteExpiredError extends Error {
@@ -129,6 +137,15 @@ export class QuoteService {
    */
   getById(quoteId: string): PriceQuote | null {
     return this.quotes.get(quoteId) ?? null;
+  }
+
+  bindOrderTerms(
+    quoteId: string,
+    terms: NonNullable<PriceQuote["terms"]>
+  ): PriceQuote {
+    const quote = this.assertFresh(quoteId);
+    quote.terms = terms;
+    return quote;
   }
 
   /**

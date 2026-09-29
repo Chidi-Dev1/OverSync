@@ -255,6 +255,13 @@ describe("OrderService.announce — quote freshness gate", () => {
     nowMs = 1_010_000; // still fresh
     const order = await orders.announce({ ...BASE_ANNOUNCE, quoteId: q.quoteId });
     expect(order.status).toBe("announced");
+    expect(quoteSvc.getById(q.quoteId)?.terms).toEqual({
+      fromAsset: BASE_ANNOUNCE.srcAsset,
+      toAsset: BASE_ANNOUNCE.dstAsset,
+      amount: BASE_ANNOUNCE.srcAmount,
+      fromNetwork: BASE_ANNOUNCE.srcChain,
+      toNetwork: BASE_ANNOUNCE.dstChain
+    });
   });
 
   it("rejects an order when quoteId references an expired quote", async () => {

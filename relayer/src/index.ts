@@ -167,7 +167,7 @@ function getEscrowFactoryABI(isMainnet: boolean) {
   return isMainnet ? MAINNET_ESCROW_FACTORY_ABI : TESTNET_ESCROW_FACTORY_ABI;
 }
 import { ethereumListener } from './ethereum-listener.js';
-import { quoterService } from './quoter-service.js';
+import { quoterService, type QuoteResponse } from './quoter-service.js';
 import { ordersService } from './orders.js';
 import { gasPriceTracker } from './gas-tracker.js';
 import { presetManager } from './preset-manager.js';
@@ -827,7 +827,10 @@ async function initializeRelayer() {
     try {
       console.log('🔍 RAW REQUEST BODY:', JSON.stringify(req.body, null, 2));
       
-      const { fromChain, toChain, fromToken, toToken, amount, ethAddress, stellarAddress, direction, exchangeRate, network, networkMode } = req.body;
+      const {
+        fromChain, toChain, fromToken, toToken, amount, ethAddress, stellarAddress,
+        direction, exchangeRate, network, networkMode, coordinatorQuoteId, relayerQuote
+      } = req.body;
       
       console.log('🎯 EXTRACTED VALUES:', {
         amount: amount,
@@ -925,7 +928,7 @@ async function initializeRelayer() {
               contractType: 'MOCK_1INCH_ESCROW_FACTORY'
             };
             
-            await storeActiveOrder(orderId, orderData);
+            await storeActiveOrder(orderId, { ...orderData, coordinatorQuoteId, relayerQuote });
             
             return res.json({
               success: true,
@@ -1028,7 +1031,9 @@ async function initializeRelayer() {
           // ✅ Add networkMode for XLM→ETH processing
           await storeActiveOrder(orderId, {
             ...orderData,
-            networkMode: requestNetwork
+            networkMode: requestNetwork,
+            coordinatorQuoteId,
+            relayerQuote
           });
           
           const totalCost = userAmountWei + actualSafetyDeposit;
@@ -1115,7 +1120,7 @@ async function initializeRelayer() {
           amount: (parseFloat(amount) * 1e18).toString(),
           hashLock,
           timelock: Math.floor(Date.now() / 1000) + 7201, // 2+ hours,
-          stellarTimelock: Math.floor(Date.now() / 1000) + (1 * 60 * 60) // 1 hour (dst expires before src)
+          stellarTimelock: Math.floor(Date.now() / 1000) + (1 * 60 * 60), // 1 hour (dst expires before src)
           feeRate: 100, // 1%
           beneficiary: stellarAddress,
           refundAddress: normalizedEthAddress,
@@ -1145,7 +1150,9 @@ async function initializeRelayer() {
           stellarAddress,
           amount: orderData.amount,  // ✅ Use wei format, not decimal string
           exchangeRate: exchangeRate || ETH_TO_XLM_RATE,
-          networkMode: requestNetwork  // ✅ Store network for XLM→ETH processing
+          networkMode: requestNetwork,  // ✅ Store network for XLM→ETH processing
+          coordinatorQuoteId,
+          relayerQuote
         });
 
         console.log('✅ TESTNET ETH→XLM Order created:', orderId);
@@ -1254,7 +1261,7 @@ async function initializeRelayer() {
             contractType: 'MOCK_DUAL_HTLC'
           };
           
-          await storeActiveOrder(orderId, orderData);
+          await storeActiveOrder(orderId, { ...orderData, coordinatorQuoteId, relayerQuote });
 
           return res.json({
             success: true,
@@ -1340,7 +1347,7 @@ async function initializeRelayer() {
           }
         };
 
-        await storeActiveOrder(orderId, orderData);
+        await storeActiveOrder(orderId, { ...orderData, coordinatorQuoteId, relayerQuote });
 
         res.json({
           success: true,
@@ -1800,7 +1807,9 @@ async function initializeRelayer() {
         // a duplicate /process request is reported as already handled.
         let result: any;
         try {
-          const submission = await relaySubmissionTracker.submit(
+          const submission = await quoterService.submitIfCoordinatorQuoteMatches(
+            storedOrder.relayerQuote as QuoteResponse | undefined,
+            storedOrder.coordinatorQuoteId as string | undefined,
             {
               kind: 'eth->xlm',
               orderId,
@@ -1809,6 +1818,7 @@ async function initializeRelayer() {
               amount: xlmAmount,
               extra: { network: dynamicNetwork },
             },
+            relaySubmissionTracker,
             () => server.submitTransaction(transaction)
           );
           result = submission.result;
