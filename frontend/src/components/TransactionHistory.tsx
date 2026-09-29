@@ -557,6 +557,7 @@ export default function TransactionHistory({ ethAddress, stellarAddress }: Trans
       {refundTarget && refundTarget.onChainOrderId && refundTarget.htlcContractAddress && refundTarget.timelockUnixSeconds && ethAddress && (
         <div className="fixed inset-0 bg-black/70 backdrop-blur-sm flex items-center justify-center z-50 p-4">
           <RefundDialog
+            coordinatorOrderId={refundTarget.id}
             userAddress={ethAddress as Address}
             orderId={refundTarget.onChainOrderId}
             timelockUnixSeconds={refundTarget.timelockUnixSeconds}
