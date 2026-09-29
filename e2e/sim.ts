@@ -7,6 +7,11 @@ export type OrderStatus = "Funded" | "Claimed" | "Refunded";
 export interface CreateOrderInput {
   hashlock: Hex;
   timelockSeconds: number;
+  /**
+   * Address attempting the create. Required only when the registry gate
+   * is enabled; used to look the sender up in the active-resolver set.
+   */
+  sender?: string;
 }
 
 export interface OrderView {
@@ -26,7 +31,8 @@ export type SimErrorCode =
   | "OrderNotRefundable"
   | "InvalidPreimage"
   | "Expired"
-  | "NotExpired";
+  | "NotExpired"
+  | "ResolverNotAuthorised";
 
 export class SimError extends Error {
   constructor(public readonly code: SimErrorCode) {
@@ -42,6 +48,13 @@ export interface HtlcSim {
   refundOrder(id: bigint): void;
   getOrder(id: bigint): OrderView;
   advanceTime(seconds: number): void;
+  /**
+   * Mirrors `HTLCEscrow`'s optional `ResolverRegistry`: when enabled,
+   * only an active resolver may create an order. Claim and refund stay
+   * permissionless regardless of registry state.
+   */
+  setRegistryEnabled(enabled: boolean): void;
+  setResolverActive(resolver: string, active: boolean): void;
 }
 
 // Mirrors the [MIN_TIMELOCK, MAX_TIMELOCK] bounds enforced by both
@@ -53,6 +66,8 @@ abstract class BaseHtlcSim {
   protected readonly orders = new Map<bigint, OrderView>();
   protected nextId = 1n;
   protected now: number;
+  private registryEnabled = false;
+  private readonly activeResolvers = new Set<string>();
 
   constructor() {
     this.now = Math.floor(Date.now() / 1000);
@@ -62,12 +77,27 @@ abstract class BaseHtlcSim {
     this.now += seconds;
   }
 
+  setRegistryEnabled(enabled: boolean): void {
+    this.registryEnabled = enabled;
+  }
+
+  setResolverActive(resolver: string, active: boolean): void {
+    if (active) this.activeResolvers.add(resolver.toLowerCase());
+    else this.activeResolvers.delete(resolver.toLowerCase());
+  }
+
   createOrder(input: CreateOrderInput): bigint {
     if (!/^0x[0-9a-fA-F]{64}$/.test(input.hashlock) || /^0x0+$/.test(input.hashlock)) {
       throw new SimError("InvalidHashlock");
     }
     if (input.timelockSeconds < MIN_TIMELOCK || input.timelockSeconds > MAX_TIMELOCK) {
       throw new SimError("InvalidTimelock");
+    }
+    if (this.registryEnabled) {
+      const sender = input.sender?.toLowerCase();
+      if (!sender || !this.activeResolvers.has(sender)) {
+        throw new SimError("ResolverNotAuthorised");
+      }
     }
     const id = this.nextId++;
     this.orders.set(id, {

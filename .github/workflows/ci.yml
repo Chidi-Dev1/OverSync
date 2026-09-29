@@ -56,6 +56,12 @@ jobs:
       - name: Test — coordinator
         run: pnpm --filter @oversync/coordinator test
 
+      - name: Test — resolver
+        run: pnpm --filter @oversync/resolver test
+
+      - name: Test — cross-chain authorization parity
+        run: pnpm --filter @oversync/e2e test
+
       - name: Compile contracts
         run: pnpm --filter @oversync/contracts compile
 
