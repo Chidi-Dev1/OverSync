@@ -9,7 +9,7 @@ import {
 import { isTestnet, getCurrentNetwork } from '../config/networks';
 import type { NetworkModeState } from '../lib/useNetworkMode';
 import { parseHtlcReceipt } from '../lib/parseHtlcReceipt';
-import { sanitizeAmountInput } from '../lib/sanitizeAmountInput';
+import { sanitizeAmountInput, parseAmountToBaseUnits } from '../lib/sanitizeAmountInput';
 import { AlertTriangle, ArrowDownUp, CheckCircle2, Loader2, RefreshCw, Settings2 } from 'lucide-react';
 
 // Web3 imports for contract interaction
@@ -406,6 +406,15 @@ export default function BridgeForm({ ethAddress, stellarAddress, signStellarTran
               alert('Please fill all fields and connect wallets.');
       return;
     }
+
+    // Parse the amount to base units exactly once, with no floating point.
+    // The coordinator applies the same parse, and this integer (not the raw
+    // text) is what the order request carries.
+    const amountBaseUnits = parseAmountToBaseUnits(amount, fromToken.decimals);
+    if (amountBaseUnits === null || amountBaseUnits === 0n) {
+      alert(`Enter a positive amount with at most ${fromToken.decimals} decimal places.`);
+      return;
+    }
     
     if (!window.ethereum) {
       alert('MetaMask bulunamadı! Lütfen MetaMask yükleyin.');
@@ -508,6 +517,7 @@ export default function BridgeForm({ ethAddress, stellarAddress, signStellarTran
         fromToken: direction === 'eth_to_xlm' ? 'ETH' : 'XLM',
         toToken: direction === 'eth_to_xlm' ? 'XLM' : 'ETH',
         amount: amount,
+        amountBaseUnits: amountBaseUnits.toString(),
         ethAddress: ethAddress,
         stellarAddress: stellarAddress,
         direction: direction,
