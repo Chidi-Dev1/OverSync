@@ -259,9 +259,8 @@ contract HTLCEscrow is IHTLCEscrow, ReentrancyGuard {
     // Internals
     // ---------------------------------------------------------------
 
-    /// @dev Suppress low-level-calls and arbitrary-send-eth: Safe because _payout only transfers native ETH to the validated beneficiary or refundAddress stored in the order structure. Slither anchors the finding to the function signature, so the suppression comment must be the line immediately above it.
-    // slither-disable-next-line low-level-calls
-    // slither-disable-next-line arbitrary-send-eth
+    /// @dev Suppress low-level-calls and arbitrary-send-eth: Safe because _payout only transfers native ETH to the validated beneficiary or refundAddress stored in the order structure. Slither anchors both findings to the function signature, so the single comma-separated suppression must be the line immediately above it.
+    // slither-disable-next-line low-level-calls,arbitrary-send-eth
     function _payout(address token, address to, uint256 amount) private {
         if (token == address(0)) {
             // Native ETH transfer.
