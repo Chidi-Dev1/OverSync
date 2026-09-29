@@ -1,6 +1,7 @@
 import { Router } from "express";
 import { z } from "zod";
 import type { SecretService } from "../../services/secret-service.js";
+import { isTransitionRejection } from "../../services/order-service.js";
 
 export function secretsRoutes(secrets: SecretService): Router {
   const router = Router();
@@ -19,6 +20,19 @@ export function secretsRoutes(secrets: SecretService): Router {
     } catch (err) {
       if (err instanceof z.ZodError) {
         res.status(400).json({ error: "validation_error", details: err.errors });
+        return;
+      }
+      // The state machine refused the reveal: the order is not escrowed yet,
+      // or it has already moved past the secret step (#252).
+      if (isTransitionRejection(err)) {
+        res.status(409).json({
+          error: "illegal_transition",
+          code: err.code,
+          from: err.from,
+          to: err.to,
+          action: err.action,
+          message: err.message
+        });
         return;
       }
       if (err instanceof Error) {
