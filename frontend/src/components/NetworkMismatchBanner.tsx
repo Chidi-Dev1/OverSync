@@ -1,6 +1,10 @@
 import { useState } from 'react';
 import type { NetworkModeState } from '../lib/useNetworkMode';
-import { isMainnetEnabled } from '../config/networks';
+import {
+  isMainnetEnabled,
+  STELLAR_MAINNET_PASSPHRASE,
+  STELLAR_TESTNET_PASSPHRASE,
+} from '../config/networks';
 
 interface Props {
   networkState: NetworkModeState;
@@ -17,8 +21,8 @@ const ETH_MODE_FROM_CHAIN: Record<string, string> = {
 };
 
 const STELLAR_MODE_FROM_PASSPHRASE: Record<string, string> = {
-  'Public Global Stellar Network ; September 2015': 'Stellar Mainnet',
-  'Test SDF Network ; September 2015': 'Stellar Testnet',
+  [STELLAR_MAINNET_PASSPHRASE]: 'Stellar Mainnet',
+  [STELLAR_TESTNET_PASSPHRASE]: 'Stellar Testnet',
 };
 
 function describeMetamaskChain(chainId: string | null): string {
@@ -62,7 +66,7 @@ export default function NetworkMismatchBanner({ networkState }: Props) {
       metamaskChainId?.toLowerCase() === '0x1') ||
     (freighterConnected &&
       !freighterMatches &&
-      freighterNetworkPassphrase === 'Public Global Stellar Network ; September 2015');
+      freighterNetworkPassphrase === STELLAR_MAINNET_PASSPHRASE);
 
   const showSwitchAppToWallet = isMainnetEnabled() || !walletWantsMainnet;
 
@@ -75,7 +79,7 @@ export default function NetworkMismatchBanner({ networkState }: Props) {
             ? 'mainnet'
             : 'testnet'
           : freighterConnected && !freighterMatches
-            ? freighterNetworkPassphrase === 'Public Global Stellar Network ; September 2015'
+            ? freighterNetworkPassphrase === STELLAR_MAINNET_PASSPHRASE
               ? 'mainnet'
               : 'testnet'
             : mode;

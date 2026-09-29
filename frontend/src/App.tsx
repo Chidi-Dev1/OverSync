@@ -541,7 +541,10 @@ function App() {
               ethAddress={ethAddress}
               stellarAddress={stellarAddress || ''}
               signStellarTransaction={(xdr, networkPassphrase) =>
-                signStellarTransaction(xdr, networkPassphrase, stellarAddress || undefined)
+                signStellarTransaction(xdr, networkPassphrase, stellarAddress || undefined, {
+                  networkMode: networkState.mode,
+                  expectedPassphrase: networkState.expectedStellarPassphrase,
+                })
               }
               networkState={networkState}
             />
