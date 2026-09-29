@@ -11,9 +11,30 @@ function sha256Hex(buf: Buffer): string {
   return "0x" + createHash("sha256").update(buf).digest("hex");
 }
 
+function assertValidSecretFormat(value: unknown, fieldName: string = "secret"): `0x${string}` {
+  if (typeof value !== "string") {
+    throw new Error(`${fieldName} must be a string`);
+  }
+  if (!value.startsWith("0x")) {
+    throw new Error(`${fieldName} must start with "0x"`);
+  }
+  const hexPart = value.slice(2);
+  if (hexPart.length !== 64) {
+    throw new Error(`${fieldName} must be exactly 32 bytes (64 hex characters)`);
+  }
+  if (!/^[0-9a-fA-F]+$/.test(hexPart)) {
+    throw new Error(`${fieldName} contains invalid hex characters`);
+  }
+  if (/^0+$/.test(hexPart)) {
+    throw new Error(`${fieldName} must not be all zeros`);
+  }
+  return value as `0x${string}`;
+}
+
 function keccak256Hex(buf: Buffer): string {
   return keccak256(toHex(buf)) as `0x${string}`;
 }
+
 
 /**
  * Coordinates secret reveal between the two chains.
@@ -36,11 +57,13 @@ export class SecretService {
    * before storing it, so a malicious caller cannot poison the cache.
    */
   async reveal(publicId: string, preimage: string, txHash: string): Promise<{ ok: true }> {
+    assertValidSecretFormat(preimage, "preimage");
+    const canonical = preimage.toLowerCase() as `0x${string}`;
     const order = await this.orders.get(publicId);
     if (!order) {
       throw new Error(`unknown order ${publicId}`);
     }
-    const buf = bufferFromHex(preimage);
+    const buf = bufferFromHex(canonical);
     const shaHash = sha256Hex(buf);
     const kekHash = keccak256Hex(buf);
     if (shaHash !== order.hashlock && kekHash !== order.hashlock) {
@@ -50,7 +73,17 @@ export class SecretService {
       );
       throw new Error("preimage does not match order hashlock");
     }
-    await this.orders.recordSecret(publicId, preimage, txHash);
+
+    const existing = await this.orders.findByPreimage(canonical);
+    if (existing && existing.publicId !== publicId) {
+      this.log.warn(
+        { publicId, reusedBy: existing.publicId },
+        "rejected reused preimage"
+      );
+      throw new Error("preimage already used in another order");
+    }
+
+    await this.orders.recordSecret(publicId, canonical, txHash);
     return { ok: true };
   }
 

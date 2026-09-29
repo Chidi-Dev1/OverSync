@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { generateSecret, hashSecret, verifyPreimage } from "../src/secrets/index.js";
+import { generateSecret, hashSecret, verifyPreimage, assertValidSecretFormat, assertPreimageMatchesHashlock } from "../src/secrets/index.js";
 
 describe("secrets", () => {
   it("generates a 32-byte secret with both digests", () => {
@@ -23,5 +23,54 @@ describe("secrets", () => {
     expect(verifyPreimage(s.preimage, s.keccak256)).toBe("keccak256");
     const other = generateSecret();
     expect(verifyPreimage(s.preimage, other.sha256)).toBeNull();
+  });
+
+  it("validates the complete preimage/hashlock pair", () => {
+    const secret = generateSecret();
+    expect(assertPreimageMatchesHashlock(secret.preimage, secret.sha256)).toBe("sha256");
+    expect(assertPreimageMatchesHashlock(secret.preimage, secret.keccak256)).toBe("keccak256");
+    expect(() => assertPreimageMatchesHashlock("0x" + "b".repeat(64), secret.sha256)).toThrow("does not match");
+    expect(() => assertPreimageMatchesHashlock("0x12", secret.sha256)).toThrow("preimage must be exactly 32 bytes");
+    expect(() => assertPreimageMatchesHashlock(secret.preimage, "0x12")).toThrow("hashlock must be exactly 32 bytes");
+  });
+
+  describe("assertValidSecretFormat", () => {
+    it("accepts valid 32-byte hex strings with 0x prefix", () => {
+      const valid = "0x" + "a".repeat(64);
+      expect(assertValidSecretFormat(valid)).toBe(valid);
+    });
+
+    it("accepts valid uppercase hex characters", () => {
+      const validUpper = "0x" + "A".repeat(64);
+      expect(assertValidSecretFormat(validUpper)).toBe(validUpper);
+    });
+
+    it("rejects non-strings", () => {
+      expect(() => assertValidSecretFormat(123)).toThrow("secret must be a string");
+      expect(() => assertValidSecretFormat(null)).toThrow("secret must be a string");
+    });
+
+    it("rejects strings without 0x prefix", () => {
+      expect(() => assertValidSecretFormat("a".repeat(64))).toThrow('secret must start with "0x"');
+    });
+
+    it("rejects wrong length strings", () => {
+      expect(() => assertValidSecretFormat("0x" + "a".repeat(62))).toThrow("secret must be exactly 32 bytes (64 hex characters)");
+      expect(() => assertValidSecretFormat("0x" + "a".repeat(66))).toThrow("secret must be exactly 32 bytes (64 hex characters)");
+    });
+
+    it("rejects strings with non-hex characters", () => {
+      const invalid = "0x" + "g".repeat(64); // 'g' is not valid hex
+      expect(() => assertValidSecretFormat(invalid)).toThrow("secret contains invalid hex characters");
+    });
+
+    it("rejects all-zero secrets", () => {
+      const zero = "0x" + "0".repeat(64);
+      expect(() => assertValidSecretFormat(zero)).toThrow("secret must not be all zeros");
+    });
+
+    it("uses custom field name in errors", () => {
+      expect(() => assertValidSecretFormat("invalid", "hashlock")).toThrow('hashlock must start with "0x"');
+    });
   });
 });

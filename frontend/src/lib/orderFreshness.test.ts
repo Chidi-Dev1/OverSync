@@ -1,143 +1,202 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { isOrderStale, checkOrderFreshness } from './orderFreshness';
-import type { RecoveredOrder } from './orderRecovery';
+import { describe, test, expect } from 'vitest';
+import {
+  classifyOrderFreshness,
+  FRESH_THRESHOLD_MS,
+  PENDING_THRESHOLD_MS,
+  STALE_THRESHOLD_MS,
+  REFUND_SOON_WINDOW_MS,
+  type OrderFreshnessInput,
+} from './orderFreshness';
 
-describe('orderFreshness', () => {
-  const baseOrder: RecoveredOrder = {
-    id: 'test-order-1',
-    direction: 'eth_to_xlm',
-    status: 'src_locked',
-    hashlock: '0x123',
-    src: {
-      chain: 'ethereum',
-      address: '0x111',
-      asset: 'ETH',
-      amount: '1000',
-      timelock: Math.floor(Date.now() / 1000) + 3600, // 1 hour in future
-    },
-    dst: {
-      chain: 'stellar',
-      address: 'G222',
-      asset: 'XLM',
-      amount: '10000',
-    },
-    createdAt: Date.now() - 60000,
-    updatedAt: Date.now() - 30000,
+// ─── Fixed reference point ───────────────────────────────────────────────────
+const NOW = 1_700_000_000_000; // arbitrary fixed "now" in ms
+
+function make(overrides: Partial<OrderFreshnessInput>): OrderFreshnessInput {
+  return {
+    status: 'pending',
+    updatedAt: NOW - 1_000, // 1 s ago by default
+    nowMs: NOW,
+    ...overrides,
   };
+}
 
-  beforeEach(() => {
-    vi.restoreAllMocks();
+// ─── Terminal statuses ───────────────────────────────────────────────────────
+
+describe('terminal statuses → always fresh', () => {
+  const terminals = ['completed', 'refunded', 'failed', 'cancelled'];
+
+  for (const status of terminals) {
+    test(`${status} returns "fresh" even when very old`, () => {
+      const result = classifyOrderFreshness(
+        make({ status, updatedAt: NOW - STALE_THRESHOLD_MS * 10 })
+      );
+      expect(result.label).toBe('fresh');
+      expect(result.hint).toBe('');
+    });
+  }
+});
+
+// ─── Age-based thresholds ────────────────────────────────────────────────────
+
+describe('age-based freshness classification', () => {
+  test('returns "fresh" when order is very new', () => {
+    const result = classifyOrderFreshness(
+      make({ updatedAt: NOW - 30_000 }) // 30 s ago
+    );
+    expect(result.label).toBe('fresh');
   });
 
-  describe('isOrderStale', () => {
-    it('returns false for null or undefined order', () => {
-      expect(isOrderStale(null)).toBe(false);
-      expect(isOrderStale(undefined)).toBe(false);
-    });
-
-    it('returns false for active order with future timelock', () => {
-      expect(isOrderStale(baseOrder)).toBe(false);
-    });
-
-    it('returns true when isStale is explicitly set', () => {
-      expect(isOrderStale({ ...baseOrder, isStale: true })).toBe(true);
-      expect(isOrderStale({ ...baseOrder, stale: true } as any)).toBe(true);
-    });
-
-    it('returns true when coordinator order status is expired', () => {
-      expect(isOrderStale({ ...baseOrder, status: 'expired' })).toBe(true);
-    });
-
-    it('returns true when coordinator order status is failed', () => {
-      expect(isOrderStale({ ...baseOrder, status: 'failed' })).toBe(true);
-    });
-
-    it('returns true when src timelock has passed for non-completed order', () => {
-      const pastOrder: RecoveredOrder = {
-        ...baseOrder,
-        src: {
-          ...baseOrder.src,
-          timelock: Math.floor(Date.now() / 1000) - 10, // 10s in past
-        },
-      };
-      expect(isOrderStale(pastOrder)).toBe(true);
-    });
-
-    it('returns true when dst timelock has passed for non-completed order', () => {
-      const pastOrder: RecoveredOrder = {
-        ...baseOrder,
-        dst: {
-          ...baseOrder.dst,
-          timelock: Math.floor(Date.now() / 1000) - 5,
-        },
-      };
-      expect(isOrderStale(pastOrder)).toBe(true);
-    });
-
-    it('returns false when timelock has passed but order is completed', () => {
-      const completedOrder: RecoveredOrder = {
-        ...baseOrder,
-        status: 'completed',
-        src: {
-          ...baseOrder.src,
-          timelock: Math.floor(Date.now() / 1000) - 100,
-        },
-      };
-      expect(isOrderStale(completedOrder)).toBe(false);
-    });
-
-    it('returns true when maxAgeMs is exceeded', () => {
-      const now = Date.now();
-      const oldOrder: RecoveredOrder = {
-        ...baseOrder,
-        updatedAt: now - 120_000,
-      };
-      expect(isOrderStale(oldOrder, { now, maxAgeMs: 60_000 })).toBe(true);
-      expect(isOrderStale(oldOrder, { now, maxAgeMs: 180_000 })).toBe(false);
-    });
+  test('returns "fresh" just below FRESH_THRESHOLD_MS', () => {
+    const result = classifyOrderFreshness(
+      make({ updatedAt: NOW - (FRESH_THRESHOLD_MS - 1) })
+    );
+    expect(result.label).toBe('fresh');
   });
 
-  describe('checkOrderFreshness', () => {
-    it('returns fresh order and isStale boolean from coordinator response', async () => {
-      vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce({
-        ok: true,
-        status: 200,
-        json: async () => baseOrder,
-      } as Response);
+  test('returns "pending" just at FRESH_THRESHOLD_MS', () => {
+    const result = classifyOrderFreshness(
+      make({ updatedAt: NOW - FRESH_THRESHOLD_MS })
+    );
+    expect(result.label).toBe('pending');
+    expect(result.hint).toMatch(/cross-chain swaps can take/i);
+  });
 
-      const result = await checkOrderFreshness('test-order-1', {
-        baseUrl: 'https://api.test',
-      });
+  test('returns "pending" just below PENDING_THRESHOLD_MS', () => {
+    const result = classifyOrderFreshness(
+      make({ updatedAt: NOW - (PENDING_THRESHOLD_MS - 1) })
+    );
+    expect(result.label).toBe('pending');
+  });
 
-      expect(result.order).toEqual(baseOrder);
-      expect(result.isStale).toBe(false);
-    });
+  test('returns "stale" just at PENDING_THRESHOLD_MS', () => {
+    const result = classifyOrderFreshness(
+      make({ updatedAt: NOW - PENDING_THRESHOLD_MS })
+    );
+    expect(result.label).toBe('stale');
+    expect(result.hint).toMatch(/longer than expected/i);
+  });
 
-    it('detects staleness when coordinator returns expired order', async () => {
-      const expiredOrder = { ...baseOrder, status: 'expired' as const };
-      vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce({
-        ok: true,
-        status: 200,
-        json: async () => expiredOrder,
-      } as Response);
+  test('returns "stale" well beyond STALE_THRESHOLD_MS', () => {
+    const result = classifyOrderFreshness(
+      make({ updatedAt: NOW - STALE_THRESHOLD_MS * 3 })
+    );
+    expect(result.label).toBe('stale');
+    expect(result.hint).toMatch(/pending for a while/i);
+  });
+});
 
-      const result = await checkOrderFreshness('test-order-1', {
-        baseUrl: 'https://api.test',
-      });
+// ─── Timelock / refund logic ─────────────────────────────────────────────────
 
-      expect(result.order.status).toBe('expired');
-      expect(result.isStale).toBe(true);
-    });
+describe('timelock classification', () => {
+  const ONE_HOUR_S = 3600;
 
-    it('throws error when coordinator returns 404 or fails', async () => {
-      vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce({
-        ok: false,
-        status: 404,
-      } as Response);
+  test('returns "refund-eligible" when timelock has expired', () => {
+    const expiredTimelock = Math.floor((NOW - 60_000) / 1_000); // expired 1 min ago
+    const result = classifyOrderFreshness(
+      make({ timelockUnixSeconds: expiredTimelock })
+    );
+    expect(result.label).toBe('refund-eligible');
+    expect(result.hint).toMatch(/can request a refund/i);
+  });
 
-      await expect(
-        checkOrderFreshness('missing-order', { baseUrl: 'https://api.test' })
-      ).rejects.toThrow(/not found/);
-    });
+  test('returns "refund-soon" when timelock expires within warning window', () => {
+    const soonExpiry = Math.floor((NOW + REFUND_SOON_WINDOW_MS - 30_000) / 1_000); // 30 s inside window
+    const result = classifyOrderFreshness(
+      make({ timelockUnixSeconds: soonExpiry })
+    );
+    expect(result.label).toBe('refund-soon');
+    expect(result.hint).toMatch(/expires in/i);
+  });
+
+  test('"refund-soon" hint includes approximate minutes remaining', () => {
+    const tenMinutes = Math.floor((NOW + 10 * 60_000) / 1_000);
+    const result = classifyOrderFreshness(
+      make({ timelockUnixSeconds: tenMinutes })
+    );
+    expect(result.label).toBe('refund-soon');
+    // Should say "~10 min" or similar
+    expect(result.hint).toMatch(/10 min/i);
+  });
+
+  test('returns age-based label when timelock is far in future', () => {
+    const farFuture = Math.floor((NOW + ONE_HOUR_S * 2 * 1_000) / 1_000);
+    // Order is fresh (1 s old), timelock is 2 h away
+    const result = classifyOrderFreshness(
+      make({ timelockUnixSeconds: farFuture })
+    );
+    expect(result.label).toBe('fresh');
+  });
+
+  test('refund-eligible takes priority over stale age', () => {
+    // Even if the order is very old AND eligible for refund, refund-eligible wins
+    const expiredTimelock = Math.floor((NOW - 60_000) / 1_000);
+    const result = classifyOrderFreshness(
+      make({
+        updatedAt: NOW - STALE_THRESHOLD_MS * 5,
+        timelockUnixSeconds: expiredTimelock,
+      })
+    );
+    expect(result.label).toBe('refund-eligible');
+  });
+
+  test('no timelockUnixSeconds → falls back to age-based only', () => {
+    const result = classifyOrderFreshness(
+      make({ updatedAt: NOW - STALE_THRESHOLD_MS * 2 })
+    );
+    expect(result.label).toBe('stale');
+  });
+});
+
+// ─── Coordinator statuses ────────────────────────────────────────────────────
+
+describe('coordinator-native statuses', () => {
+  test('src_locked treated as active (not terminal)', () => {
+    const result = classifyOrderFreshness(
+      make({ status: 'src_locked', updatedAt: NOW - STALE_THRESHOLD_MS * 2 })
+    );
+    expect(result.label).toBe('stale');
+  });
+
+  test('dst_locked treated as active (not terminal)', () => {
+    const result = classifyOrderFreshness(
+      make({ status: 'dst_locked', updatedAt: NOW - PENDING_THRESHOLD_MS })
+    );
+    expect(result.label).toBe('stale');
+  });
+
+  test('announced treated as active', () => {
+    const result = classifyOrderFreshness(
+      make({ status: 'announced', updatedAt: NOW - FRESH_THRESHOLD_MS })
+    );
+    expect(result.label).toBe('pending');
+  });
+
+  test('secret_revealed treated as active', () => {
+    const result = classifyOrderFreshness(
+      make({ status: 'secret_revealed', updatedAt: NOW - STALE_THRESHOLD_MS * 2 })
+    );
+    expect(result.label).toBe('stale');
+  });
+});
+
+// ─── Hint content guardrails ─────────────────────────────────────────────────
+
+describe('hint content guardrails', () => {
+  test('"fresh" hint is always an empty string', () => {
+    expect(classifyOrderFreshness(make({})).hint).toBe('');
+  });
+
+  test('no hint uses alarming language for "pending"', () => {
+    const result = classifyOrderFreshness(
+      make({ updatedAt: NOW - FRESH_THRESHOLD_MS })
+    );
+    expect(result.hint).not.toMatch(/error|fail|danger|alert/i);
+  });
+
+  test('no hint uses alarming language for "stale"', () => {
+    const result = classifyOrderFreshness(
+      make({ updatedAt: NOW - STALE_THRESHOLD_MS * 2 })
+    );
+    expect(result.hint).not.toMatch(/error|fail|danger|alert/i);
   });
 });

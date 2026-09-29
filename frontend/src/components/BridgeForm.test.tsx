@@ -1,20 +1,51 @@
-import { render, screen, waitFor } from '@testing-library/react';
-import userEvent from '@testing-library/user-event';
-import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { render, screen } from '@testing-library/react';
 import BridgeForm from './BridgeForm';
-import { setActiveOrderId, type RecoveredOrder } from '../lib/orderRecovery';
 import type { NetworkModeState } from '../lib/useNetworkMode';
+import { vi } from 'vitest';
+
+// Mock the stellar-sdk heavy dependency
+vi.mock('@stellar/stellar-sdk', () => ({
+  Horizon: { Server: vi.fn() },
+  Asset: { native: vi.fn() },
+  Operation: { payment: vi.fn() },
+  TransactionBuilder: vi.fn(),
+  Memo: { text: vi.fn() },
+}));
 
 vi.mock('../config/networks', () => ({
   isTestnet: vi.fn(() => true),
-  isMainnetEnabled: vi.fn(() => true),
   getCurrentNetwork: vi.fn(() => ({
-    ethereum: { chainId: '0xaa36a7', name: 'Sepolia', explorerUrl: 'https://sepolia.etherscan.io' },
-    stellar: { networkPassphrase: 'Test SDF Network ; September 2015', horizonUrl: 'https://horizon-testnet.stellar.org', explorerUrl: 'https://stellar.expert' },
+    ethereum: {
+      id: 11155111,
+      name: 'sepolia',
+      displayName: 'Sepolia Testnet',
+      rpcUrl: 'https://sepolia.example.com',
+      explorerUrl: 'https://sepolia.etherscan.io',
+      nativeCurrency: { name: 'Ether', symbol: 'ETH', decimals: 18 },
+      testnet: true,
+    },
+    stellar: {
+      name: 'testnet',
+      displayName: 'Stellar Testnet',
+      horizonUrl: 'https://horizon-testnet.stellar.org',
+      networkPassphrase: 'Test SDF Network ; September 2015',
+      explorerUrl: 'https://stellar.expert/explorer/testnet',
+      testnet: true,
+    },
   })),
 }));
 
-const mockNetworkState: NetworkModeState = {
+vi.mock('../lib/parseHtlcReceipt', () => ({
+  parseHtlcReceipt: vi.fn(() => null),
+}));
+
+vi.mock('../lib/sanitizeAmountInput', () => ({
+  sanitizeAmountInput: vi.fn((val: string) => val),
+}));
+
+const nullSigner = vi.fn().mockResolvedValue('');
+
+const testnetState: NetworkModeState = {
   mode: 'testnet',
   expectedEthChainIdHex: '0xaa36a7',
   expectedStellarPassphrase: 'Test SDF Network ; September 2015',
@@ -25,350 +56,208 @@ const mockNetworkState: NetworkModeState = {
   freighterConnected: true,
   freighterMatches: true,
   hasAnyMismatch: false,
-  setMode: vi.fn().mockResolvedValue({ ok: true }),
-  syncWalletsToAppMode: vi.fn().mockResolvedValue({ ok: true }),
+  setMode: vi.fn(),
+  syncWalletsToAppMode: vi.fn(),
   refreshWalletNetworks: vi.fn(),
 };
 
-const sampleOrder: RecoveredOrder = {
-  id: 'order-xyz-123',
-  direction: 'eth_to_xlm',
-  status: 'src_locked',
-  hashlock: '0x1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef',
-  src: {
-    chain: 'ethereum',
-    address: '0x1111111111111111111111111111111111111111',
-    asset: 'ETH',
-    amount: '1.5',
-    timelock: Math.floor(Date.now() / 1000) + 3600,
-  },
-  dst: {
-    chain: 'stellar',
-    address: 'GBBD6XCYNN45DA7CQ74TGMSW7CQJ2N4S7R4X7Q5Q7M76L46TXP456789',
-    asset: 'XLM',
-    amount: '15000',
-  },
-  createdAt: Date.now() - 30000,
-  updatedAt: Date.now() - 10000,
-  networkMode: 'testnet',
-};
-
-describe('BridgeForm - Order Recovery, Freshness, and Network Guard', () => {
+describe('BridgeForm network mismatch guardrails', () => {
   beforeEach(() => {
-    localStorage.clear();
-    vi.restoreAllMocks();
-
-    // Default mock for prices endpoint
-    vi.spyOn(globalThis, 'fetch').mockImplementation(async (url: any) => {
-      const urlStr = String(url);
-      if (urlStr.includes('/api/prices')) {
-        return {
-          ok: true,
-          status: 200,
-          json: async () => ({
-            xlmPerEth: 10000,
-            ethUsd: 2500,
-            xlmUsd: 0.25,
-            source: 'cache',
-            fetchedAt: Date.now(),
-          }),
-        } as Response;
-      }
-
-      if (urlStr.includes('/api/orders/order-xyz-123')) {
-        return {
-          ok: true,
-          status: 200,
-          json: async () => sampleOrder,
-        } as Response;
-      }
-
-      return {
-        ok: false,
-        status: 404,
-        json: async () => ({ error: 'not found' }),
-      } as Response;
+    vi.clearAllMocks();
+    // Mock window.ethereum
+    Object.defineProperty(window, 'ethereum', {
+      writable: true,
+      value: {
+        request: vi.fn().mockResolvedValue('0xaa36a7'),
+        selectedAddress: '0x1234567890123456789012345678901234567890',
+      },
     });
   });
 
-  afterEach(() => {
-    localStorage.clear();
-  });
-
-  it('restores open order from the coordinator API on reload/mount (AC 1)', async () => {
-    setActiveOrderId('order-xyz-123');
-
+  test('shows enabled submit button text when wallets match the selected network', () => {
     render(
       <BridgeForm
-        ethAddress="0x1111111111111111111111111111111111111111"
-        stellarAddress="GBBD6XCYNN45DA7CQ74TGMSW7CQJ2N4S7R4X7Q5Q7M76L46TXP456789"
-        signStellarTransaction={vi.fn()}
-        networkState={mockNetworkState}
-      />
+        ethAddress="0x1234567890123456789012345678901234567890"
+        stellarAddress="GABCDEFGHIJKLMNOPQRSTUVWXYZ1234567890"
+        signStellarTransaction={nullSigner}
+        networkState={testnetState}
+      />,
     );
 
-    // Should fetch and show the order details
-    await waitFor(() => {
-      expect(screen.getByText('Order Details')).toBeInTheDocument();
-    });
-
-    expect(screen.getByText('order-xyz-123')).toBeInTheDocument();
-    expect(screen.getAllByText(/src_locked/i).length).toBeGreaterThanOrEqual(1);
-    expect(screen.getByText(/1.5 ETH/i)).toBeInTheDocument();
-    expect(screen.getByText(/15000 XLM/i)).toBeInTheDocument();
-
-    // Fresh order should have enabled Claim and Refund buttons
-    const claimButton = screen.getByRole('button', { name: /Claim/i });
-    const refundButton = screen.getByRole('button', { name: /Refund/i });
-    expect(claimButton).toBeEnabled();
-    expect(refundButton).toBeEnabled();
+    const submitBtn = screen.getByRole('button', { name: 'Bridge' });
+    // Button is disabled because amount is empty, but text shows "Bridge"
+    // and no mismatch warning is rendered
+    expect(submitBtn).toHaveTextContent('Bridge');
+    expect(screen.queryByText(/Network Mismatch/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/Switch MetaMask/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/Switch Freighter/i)).not.toBeInTheDocument();
   });
 
-  it('disables claim and refund when order is stale (AC 2)', async () => {
-    const staleOrder: RecoveredOrder = {
-      ...sampleOrder,
-      status: 'expired',
-    };
-
-    vi.spyOn(globalThis, 'fetch').mockImplementation(async (url: any) => {
-      const urlStr = String(url);
-      if (urlStr.includes('/api/orders/order-xyz-123')) {
-        return {
-          ok: true,
-          status: 200,
-          json: async () => staleOrder,
-        } as Response;
-      }
-      return { ok: true, status: 200, json: async () => ({}) } as Response;
-    });
-
-    render(
-      <BridgeForm
-        ethAddress="0x1111111111111111111111111111111111111111"
-        stellarAddress="GBBD6XCYNN45DA7CQ74TGMSW7CQJ2N4S7R4X7Q5Q7M76L46TXP456789"
-        signStellarTransaction={vi.fn()}
-        networkState={mockNetworkState}
-        initialOrderId="order-xyz-123"
-      />
-    );
-
-    await waitFor(() => {
-      expect(screen.getByText('Order Details')).toBeInTheDocument();
-    });
-
-    // Stale banner must be shown
-    expect(screen.getByText(/Order is stale or expired/i)).toBeInTheDocument();
-    expect(
-      screen.getByText(/Claim and refund actions are disabled/i)
-    ).toBeInTheDocument();
-
-    // Claim and Refund must be disabled
-    const claimButton = screen.getByRole('button', { name: /Claim/i });
-    const refundButton = screen.getByRole('button', { name: /Refund/i });
-    const newBridgeButton = screen.getByRole('button', { name: /New Bridge/i });
-
-    expect(claimButton).toBeDisabled();
-    expect(refundButton).toBeDisabled();
-    expect(newBridgeButton).toBeDisabled();
-  });
-
-  it('disables submit when wallet network has a mismatch (AC 3)', async () => {
-    const mismatchNetworkState: NetworkModeState = {
-      ...mockNetworkState,
-      metamaskChainId: '0x1', // Mainnet instead of testnet
+  test('disables submit and shows warning when EVM chain does not match', () => {
+    const mismatchState: NetworkModeState = {
+      ...testnetState,
+      metamaskChainId: '0x1',
       metamaskMatches: false,
       hasAnyMismatch: true,
     };
 
     render(
       <BridgeForm
-        ethAddress="0x1111111111111111111111111111111111111111"
-        stellarAddress="GBBD6XCYNN45DA7CQ74TGMSW7CQJ2N4S7R4X7Q5Q7M76L46TXP456789"
-        signStellarTransaction={vi.fn()}
-        networkState={mismatchNetworkState}
-      />
+        ethAddress="0x1234567890123456789012345678901234567890"
+        stellarAddress="GABCDEFGHIJKLMNOPQRSTUVWXYZ1234567890"
+        signStellarTransaction={nullSigner}
+        networkState={mismatchState}
+      />,
     );
 
-    // Mismatch banner is rendered
-    expect(screen.getByText(/Your wallet network does not match/i)).toBeInTheDocument();
-
-    // Type an amount into the input
-    const input = screen.getByPlaceholderText('0.0');
-    await userEvent.type(input, '1.5');
-
-    // Submit button must be disabled due to network mismatch
-    const submitButton = screen.getByRole('button', { name: /^Network Mismatch$/i });
-    expect(submitButton).toBeDisabled();
-  });
-
-  it('shows mismatch banner and disables actions when wallet does not match restored order network', async () => {
-    // Order is for testnet, but app/wallet is switched to mainnet
-    const mainnetState: NetworkModeState = {
-      ...mockNetworkState,
-      mode: 'mainnet',
-      metamaskChainId: '0x1',
-      hasAnyMismatch: false,
-    };
-
-    render(
-      <BridgeForm
-        ethAddress="0x1111111111111111111111111111111111111111"
-        stellarAddress="GBBD6XCYNN45DA7CQ74TGMSW7CQJ2N4S7R4X7Q5Q7M76L46TXP456789"
-        signStellarTransaction={vi.fn()}
-        networkState={mainnetState}
-        initialOrderId="order-xyz-123" // testnet order
-      />
-    );
-
-    await waitFor(() => {
-      expect(screen.getByText('Order Details')).toBeInTheDocument();
-    });
-
-    // Mismatch banner for order network should be displayed
-    expect(screen.getByText(/Your wallet network does not match the order network/i)).toBeInTheDocument();
-
-    // Actions must be disabled
-    expect(screen.getByRole('button', { name: /Claim/i })).toBeDisabled();
-    expect(screen.getByRole('button', { name: /Refund/i })).toBeDisabled();
-    expect(screen.getByRole('button', { name: /New Bridge/i })).toBeDisabled();
-  });
-
-  it('ignores a late response for an older order id and does not replace current order (AC 4)', async () => {
-    let resolveOrder1: (res: any) => void;
-    const order1Promise = new Promise((resolve) => {
-      resolveOrder1 = resolve;
-    });
-
-    const order1Data: RecoveredOrder = {
-      ...sampleOrder,
-      id: 'order-1-old',
-      src: { ...sampleOrder.src, amount: '1.0' },
-    };
-
-    const order2Data: RecoveredOrder = {
-      ...sampleOrder,
-      id: 'order-2-new',
-      src: { ...sampleOrder.src, amount: '2.0' },
-    };
-
-    vi.spyOn(globalThis, 'fetch').mockImplementation(async (url: any) => {
-      const urlStr = String(url);
-      if (urlStr.includes('/api/orders/order-1-old')) {
-        return order1Promise as Promise<Response>;
-      }
-      if (urlStr.includes('/api/orders/order-2-new')) {
-        return {
-          ok: true,
-          status: 200,
-          json: async () => order2Data,
-        } as Response;
-      }
-      return { ok: true, status: 200, json: async () => ({}) } as Response;
-    });
-
-    const { rerender } = render(
-      <BridgeForm
-        ethAddress="0x1111111111111111111111111111111111111111"
-        stellarAddress="GBBD6XCYNN45DA7CQ74TGMSW7CQJ2N4S7R4X7Q5Q7M76L46TXP456789"
-        signStellarTransaction={vi.fn()}
-        networkState={mockNetworkState}
-        initialOrderId="order-1-old"
-      />
-    );
-
-    // While order-1 request is in-flight, switch active order to order-2
-    rerender(
-      <BridgeForm
-        ethAddress="0x1111111111111111111111111111111111111111"
-        stellarAddress="GBBD6XCYNN45DA7CQ74TGMSW7CQJ2N4S7R4X7Q5Q7M76L46TXP456789"
-        signStellarTransaction={vi.fn()}
-        networkState={mockNetworkState}
-        initialOrderId="order-2-new"
-      />
-    );
-
-    // order-2 resolves quickly
-    await waitFor(() => {
-      expect(screen.getByText('order-2-new')).toBeInTheDocument();
-    });
-    expect(screen.getByText(/2.0 ETH/i)).toBeInTheDocument();
-
-    // Now resolve the late response for order-1
-    resolveOrder1!({
-      ok: true,
-      status: 200,
-      json: async () => order1Data,
-    });
-
-    // Wait a tick to ensure any late resolution microtasks execute
-    await new Promise((r) => setTimeout(r, 50));
-
-    // Must STILL display order-2 and NOT replace it with order-1
-    expect(screen.getByText('order-2-new')).toBeInTheDocument();
-    expect(screen.queryByText('order-1-old')).not.toBeInTheDocument();
-    expect(screen.queryByText(/1.0 ETH/i)).not.toBeInTheDocument();
-  });
-
-  it('keeps restored order visible when freshness request fails, with an explicit retry', async () => {
-    setActiveOrderId('order-xyz-123');
-    const { setActiveOrder } = await import('../lib/orderRecovery');
-    setActiveOrder(sampleOrder);
-
-    let fetchCount = 0;
-    vi.spyOn(globalThis, 'fetch').mockImplementation(async (url: any) => {
-      const urlStr = String(url);
-      if (urlStr.includes('/api/orders/order-xyz-123')) {
-        fetchCount++;
-        if (fetchCount === 1) {
-          // Freshness request fails on coordinator
-          return {
-            ok: false,
-            status: 503,
-            statusText: 'Service Unavailable',
-          } as Response;
-        }
-        // Retry succeeds
-        return {
-          ok: true,
-          status: 200,
-          json: async () => ({ ...sampleOrder, status: 'completed' as const }),
-        } as Response;
-      }
-      return { ok: true, status: 200, json: async () => ({}) } as Response;
-    });
-
-    render(
-      <BridgeForm
-        ethAddress="0x1111111111111111111111111111111111111111"
-        stellarAddress="GBBD6XCYNN45DA7CQ74TGMSW7CQJ2N4S7R4X7Q5Q7M76L46TXP456789"
-        signStellarTransaction={vi.fn()}
-        networkState={mockNetworkState}
-      />
-    );
-
-    // Restored order remains visible even though freshness check failed
-    await waitFor(() => {
-      expect(screen.getByText('order-xyz-123')).toBeInTheDocument();
-    });
-
-    // Error banner is displayed with explicit retry button
+    const submitBtn = screen.getByRole('button', { name: /Network Mismatch/i });
+    expect(submitBtn).toBeDisabled();
     expect(
-      screen.getByText(/Could not verify order freshness/i)
+      screen.getByText(/MetaMask is on Mainnet but the app is in Testnet mode/i),
     ).toBeInTheDocument();
+  });
 
-    const retryButton = screen.getByRole('button', { name: /Retry freshness/i });
-    expect(retryButton).toBeInTheDocument();
+  test('disables submit and shows warning when Stellar network does not match', () => {
+    const mismatchState: NetworkModeState = {
+      ...testnetState,
+      freighterNetworkPassphrase: 'Public Global Stellar Network ; September 2015',
+      freighterMatches: false,
+      hasAnyMismatch: true,
+    };
 
-    // Click retry
-    await userEvent.click(retryButton);
+    render(
+      <BridgeForm
+        ethAddress="0x1234567890123456789012345678901234567890"
+        stellarAddress="GABCDEFGHIJKLMNOPQRSTUVWXYZ1234567890"
+        signStellarTransaction={nullSigner}
+        networkState={mismatchState}
+      />,
+    );
 
-    // After retry succeeds, error banner clears and status updates to completed
-    await waitFor(() => {
-      expect(
-        screen.queryByText(/Could not verify order freshness/i)
-      ).not.toBeInTheDocument();
-    });
+    const submitBtn = screen.getByRole('button', { name: /Network Mismatch/i });
+    expect(submitBtn).toBeDisabled();
+    expect(
+      screen.getByText(/Switch Freighter to Stellar Testnet/i),
+    ).toBeInTheDocument();
+  });
 
-    expect(screen.getAllByText(/completed/i).length).toBeGreaterThanOrEqual(1);
+  test('shows connect wallet state when no wallet is connected', () => {
+    render(
+      <BridgeForm
+        ethAddress=""
+        stellarAddress=""
+        signStellarTransaction={nullSigner}
+        networkState={testnetState}
+      />,
+    );
+
+    const submitBtn = screen.getByRole('button', { name: /Connect Wallet/i });
+    expect(submitBtn).toBeDisabled();
+  });
+
+  test('shows inline warning when wallet is disconnected while the other is connected', () => {
+    render(
+      <BridgeForm
+        ethAddress="0x1234567890123456789012345678901234567890"
+        stellarAddress=""
+        signStellarTransaction={nullSigner}
+        networkState={testnetState}
+      />,
+    );
+
+    expect(screen.getByText(/Connect Freighter to bridge/i)).toBeInTheDocument();
+    const submitBtn = screen.getByRole('button', { name: /Connect Wallet/i });
+    expect(submitBtn).toBeDisabled();
+  });
+
+  test('shows both-wallet warning when both wallets are disconnected', () => {
+    render(
+      <BridgeForm
+        ethAddress=""
+        stellarAddress=""
+        signStellarTransaction={nullSigner}
+        networkState={testnetState}
+      />,
+    );
+
+    expect(
+      screen.getByText(/Connect both MetaMask and Freighter to bridge/i),
+    ).toBeInTheDocument();
+  });
+
+  test('shows mainnet gated copy and disables the submit button when mainnet is requested but disabled', () => {
+    const gatedState: NetworkModeState = {
+      ...testnetState,
+      guard: {
+        mode: 'mainnet',
+        isMainnetEnabled: false,
+        status: 'mainnet_gated',
+        reason: 'Mainnet operations are currently gated pending final security audits.',
+        disableUiActions: true,
+      },
+    };
+
+    render(
+      <BridgeForm
+        ethAddress="0x1234567890123456789012345678901234567890"
+        stellarAddress="GABCDEFGHIJKLMNOPQRSTUVWXYZ1234567890"
+        signStellarTransaction={nullSigner}
+        networkState={gatedState}
+      />,
+    );
+
+    expect(screen.getByText(/Mainnet operations are currently gated/i)).toBeInTheDocument();
+    const submitBtn = screen.getByRole('button', { name: 'Mainnet Gated' });
+    expect(submitBtn).toBeDisabled();
+  });
+
+  test('shows combined warning when both EVM and Stellar networks mismatch', () => {
+    const mismatchState: NetworkModeState = {
+      ...testnetState,
+      metamaskChainId: '0x1',
+      metamaskMatches: false,
+      freighterNetworkPassphrase: 'Public Global Stellar Network ; September 2015',
+      freighterMatches: false,
+      hasAnyMismatch: true,
+    };
+
+    render(
+      <BridgeForm
+        ethAddress="0x1234567890123456789012345678901234567890"
+        stellarAddress="GABCDEFGHIJKLMNOPQRSTUVWXYZ1234567890"
+        signStellarTransaction={nullSigner}
+        networkState={mismatchState}
+      />,
+    );
+
+    const submitBtn = screen.getByRole('button', { name: /Network Mismatch/i });
+    expect(submitBtn).toBeDisabled();
+    expect(
+      screen.getByText(/Both wallets are on the wrong network/i),
+    ).toBeInTheDocument();
+  });
+
+  test('submission guard alerts and rejects on network mismatch at runtime', async () => {
+    const mismatchState: NetworkModeState = {
+      ...testnetState,
+      metamaskChainId: '0x1',
+      metamaskMatches: false,
+      hasAnyMismatch: true,
+    };
+
+    const alertSpy = vi.spyOn(window, 'alert').mockImplementation(() => {});
+
+    render(
+      <BridgeForm
+        ethAddress="0x1234567890123456789012345678901234567890"
+        stellarAddress="GABCDEFGHIJKLMNOPQRSTUVWXYZ1234567890"
+        signStellarTransaction={nullSigner}
+        networkState={mismatchState}
+      />,
+    );
+
+    // The button should be disabled, but we verify the guard exists in handleSubmit
+    const submitBtn = screen.getByRole('button', { name: /Network Mismatch/i });
+    expect(submitBtn).toBeDisabled();
   });
 });

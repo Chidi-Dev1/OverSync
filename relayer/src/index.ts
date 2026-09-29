@@ -14,6 +14,7 @@ import { ethers } from 'ethers';
 import { startRefundWatchdog } from './refund-watchdog.js';
 import { startContractEventPoller, type ContractEventBinding, type ContractEventPollerHandle } from './contract-event-poller.js';
 import { startAdaptivePoll, type AdaptivePollHandle } from './adaptive-poll.js';
+import { validateTimelockOrdering } from "./utils/timelock-validator.js";
 import { fetchIncomingEthPayments } from './eth-incoming-monitor.js';
 import {
   expireAbandonedOrders,
@@ -188,6 +189,7 @@ import RecoveryService, { RecoveryConfig, RecoveryType, RecoveryStatus } from '.
 
 // Phase 8: Monitoring System imports
 import { getMonitor } from './monitoring.js';
+import { RelaySubmissionTracker, RelayInFlightError } from './relay-submission-tracker.js';
 
 // Contract addresses
 const ETH_TO_XLM_RATE = 10000; // 1 ETH = 10,000 XLM (LEGACY - now using real-time prices)
@@ -438,6 +440,7 @@ export const RELAYER_CONFIG = {
     minTimelockDuration: Number(process.env.MIN_TIMELOCK_DURATION) || 3600,
     maxTimelockDuration: Number(process.env.MAX_TIMELOCK_DURATION) || 604800,
     defaultTimelockDuration: Number(process.env.DEFAULT_TIMELOCK_DURATION) || 86400,
+    timelockSafetyGapSeconds: Number(process.env.TIMELOCK_SAFETY_GAP_SECONDS) || 600,
     emergencyShutdown: process.env.EMERGENCY_SHUTDOWN === 'true',
     maintenanceMode: process.env.MAINTENANCE_MODE === 'true',
   },
@@ -478,6 +481,33 @@ function validateConfig() {
     console.warn('⚠️  Using placeholder Stellar secret - generate real keys for production');
   }
 }
+
+/**
+ * Idempotent submission tracker for cross-chain relays.
+ *
+ * Gives every relay action a stable fingerprint, bounds retries to a
+ * configurable budget, and remembers terminal success/failure so a timed-out
+ * or ambiguous RPC call can never re-broadcast the same action indefinitely.
+ * Retry budget defaults reuse the existing RELAYER_RETRY_* env vars.
+ */
+const TERMINAL_ERROR_PATTERNS = [
+  'INSUFFICIENT', // not enough funds — retrying will never help
+  'op_underfunded',
+  'not configured',
+  'invalid',
+];
+
+export const relaySubmissionTracker = new RelaySubmissionTracker({
+  maxAttempts: RELAYER_CONFIG.retryAttempts,
+  retryDelayMs: RELAYER_CONFIG.retryDelay,
+  timeoutMs: RELAYER_CONFIG.rpcTimeoutMs,
+  backoff: true,
+  isRetryable: (err: unknown) => {
+    const message = err instanceof Error ? err.message : String(err);
+    return !TERMINAL_ERROR_PATTERNS.some(p => message.toLowerCase().includes(p.toLowerCase()));
+  },
+  logger: console,
+});
 
 // Initialize relayer service
 async function initializeRelayer() {
@@ -1016,6 +1046,10 @@ async function initializeRelayer() {
           };
           
           const srcCancellationTimestamp = Math.floor(Date.now() / 1000) + (4 * 60 * 60); // 4 hours
+          const validation = validateTimelockOrdering(srcCancellationTimestamp, dstImmutables.timelocks, 600);
+          if (!validation.isValid) {
+            throw new Error(`Invalid timelock ordering: ${validation.error}`);
+          }
           
           // Encode EscrowFactory createDstEscrow call (DOĞRU MAINNET ABI!)
           console.log('🔍 DEBUG: About to encode createDstEscrow with:', {
@@ -1080,7 +1114,8 @@ async function initializeRelayer() {
           token: '0x0000000000000000000000000000000000000000', // ETH
           amount: (parseFloat(amount) * 1e18).toString(),
           hashLock,
-          timelock: Math.floor(Date.now() / 1000) + 7201, // 2+ hours
+          timelock: Math.floor(Date.now() / 1000) + 7201, // 2+ hours,
+          stellarTimelock: Math.floor(Date.now() / 1000) + (1 * 60 * 60) // 1 hour (dst expires before src)
           feeRate: 100, // 1%
           beneficiary: stellarAddress,
           refundAddress: normalizedEthAddress,
@@ -1093,6 +1128,15 @@ async function initializeRelayer() {
           created: new Date().toISOString(),
           status: 'pending_direct_escrow'
         };
+
+        const testnetTimelockValidation = validateTimelockOrdering(
+          orderData.timelock,
+          orderData.stellarTimelock,
+          RELAYER_CONFIG.security.timelockSafetyGapSeconds
+        );
+        if (!testnetTimelockValidation.isValid) {
+          throw new Error(`Invalid timelock ordering for ETH→XLM testnet: ${testnetTimelockValidation.error}`);
+        }
 
         // Store order
         await storeActiveOrder(orderId, {
@@ -1152,6 +1196,7 @@ async function initializeRelayer() {
           ],
           safetyDeposit: ethers.formatEther(actualSafetyDeposit.toString()),
           totalCost: ethers.formatEther(totalCost.toString()),
+           timelocks: orderData.timelock,
           contractType: 'ESCROW_FACTORY_DIRECT_TESTNET',
           contractAddress: getEscrowFactoryAddress(requestNetwork),
           note: '✅ TESTNET: ESKİ createEscrow metodu - bizim custom contract!'
@@ -1257,11 +1302,25 @@ async function initializeRelayer() {
         // Store pending order data (NO ETH HTLC YET!)
         const relayerStellarAddress = process.env.RELAYER_STELLAR_PUBLIC || 'YOUR_STELLAR_PUBLIC_KEY_HERE';
         
+        // Calculate timelocks for XLM -> ETH
+        // Stellar lock (dst): 2 hours from now
+        // ETH lock (src): Stellar lock + 10m gap + 2 hours
+        const stellarTimelock = Math.floor(Date.now() / 1000) + (2 * 60 * 60);
+        const ethTimelock = stellarTimelock + RELAYER_CONFIG.security.timelockSafetyGapSeconds + (2 * 60 * 60);
+
+        // Validate
+        const validation = validateTimelockOrdering(ethTimelock, stellarTimelock, RELAYER_CONFIG.security.timelockSafetyGapSeconds);
+        if (!validation.isValid) {
+          throw new Error(`Invalid timelock ordering for XLM->ETH: ${validation.error}`);
+        }
+
         const orderData = {
           orderId,
           direction: 'xlm_to_eth',
           stellarAmount: (xlmAmount * 1e7).toString(),
           ethAmount: ethAmountWei.toString(),
+          stellarTimelock,
+          ethTimelock,
           ethAddress,
           stellarAddress,
           exchangeRate: ethToXlmRate,
@@ -1280,7 +1339,7 @@ async function initializeRelayer() {
             beneficiary: ethAddress
           }
         };
-        
+
         await storeActiveOrder(orderId, orderData);
 
         res.json({
@@ -1290,13 +1349,15 @@ async function initializeRelayer() {
           orderData: {
             stellarAmount: (xlmAmount * 1e7).toString(),
             stellarAddress: relayerStellarAddress,
+            stellarTimelock,
+            ethTimelock,
             memo: `XLM-ETH-${orderId.substring(0, 8)}`,
             expectedEthAmount: ethAmountWei.toString(),
             status: 'awaiting_xlm_payment',
             instructions: `Send ${xlmAmount} XLM to ${relayerStellarAddress} with memo: XLM-ETH-${orderId.substring(0, 8)}`
           }
         });
-        
+
       } else {
         throw new Error('Invalid direction specified');
       }
@@ -1734,11 +1795,40 @@ async function initializeRelayer() {
         console.log('📝 Transaction signed');
         console.log('💫 Sending XLM to:', userStellarAddress);
         
-        // Submit to network
-        const result = await server.submitTransaction(transaction);
+        // Submit to network — idempotent with a bounded retry budget so a
+        // timed-out RPC call cannot re-broadcast this payment indefinitely and
+        // a duplicate /process request is reported as already handled.
+        let result: any;
+        try {
+          const submission = await relaySubmissionTracker.submit(
+            {
+              kind: 'eth->xlm',
+              orderId,
+              chain: 'stellar',
+              destination: userStellarAddress,
+              amount: xlmAmount,
+              extra: { network: dynamicNetwork },
+            },
+            () => server.submitTransaction(transaction)
+          );
+          result = submission.result;
+          if (submission.duplicate) {
+            console.log('↪️  Order already relayed; returning existing Stellar tx:', result.hash);
+          }
+        } catch (submitError: any) {
+          if (submitError instanceof RelayInFlightError) {
+            return res.status(409).json({
+              error: 'Relay already in progress for this order',
+              orderId,
+            });
+          }
+          // RelayTerminalError (budget exhausted / non-retryable) and any other
+          // failure fall through to the handler's outer catch for a 500.
+          throw submitError;
+        }
         console.log('✅ Stellar transaction successful!');
         console.log('🔍 Transaction hash:', result.hash);
-        console.log('🌐 View on StellarExpert: https://stellar.expert/explorer/' + 
+        console.log('🌐 View on StellarExpert: https://stellar.expert/explorer/' +
           (DEFAULT_NETWORK_MODE === 'mainnet' ? 'public' : 'testnet') + '/tx/' + result.hash);
         
         // Update order status
@@ -1841,8 +1931,14 @@ async function initializeRelayer() {
       // }
 
       // Use provided data or defaults if order not found in memory
-      const userEthAddress = storedOrder?.ethAddress || normalizedEthAddress;
-      const orderAmount = storedOrder?.amount || '10'; // Default for testing
+       const userEthAddress = storedOrder?.ethAddress || normalizedEthAddress;
+       if (storedOrder?.stellarTimelock && storedOrder?.ethTimelock) {
+         const validation = validateTimelockOrdering(storedOrder.ethTimelock, storedOrder.stellarTimelock, RELAYER_CONFIG.security.timelockSafetyGapSeconds);
+         if (!validation.isValid) {
+           throw new Error(`Invalid timelock ordering: ${validation.error}`);
+         }
+       }
+       const orderAmount = storedOrder?.amount || '10'; // Default for testing
 
       // 🛡️ Refund watchdog bookkeeping. We need:
       //   - `xlmReceivedAt`: when the user committed XLM (used to compute staleness)
@@ -3255,7 +3351,9 @@ app.get('/metrics', (req, res) => {
   try {
     const monitor = getMonitor();
     const metrics = monitor.getMetrics();
-    res.json(metrics);
+    // Surface relay retry budget / idempotency state so retry counts and
+    // terminal failures are visible alongside the rest of the metrics.
+    res.json({ ...metrics, relaySubmissions: relaySubmissionTracker.getStats() });
   } catch (error) {
     console.error('❌ Metrics fetch failed:', error);
     res.status(500).json({
