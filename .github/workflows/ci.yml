@@ -129,6 +129,18 @@ jobs:
       - name: Build WASM
         run: stellar contract build
 
+      # soroban-env-host 22.1.3 declares ed25519-dalek as an open `>=2.0.0` range,
+      # which Cargo now resolves to 3.x; that release's rand_core 0.9 traits are
+      # incompatible with the rand_chacha 0.3 ChaCha20Rng the crate's testutils
+      # pass to SigningKey::generate, so the test build fails. Cargo does not
+      # unify an open range with a manifest pin, so force the 2.x line in the
+      # resolved graph. soroban/Cargo.lock is gitignored, hence generating it
+      # first.
+      - name: Pin ed25519-dalek to the 2.x line
+        run: |
+          cargo generate-lockfile
+          cargo update -p ed25519-dalek@3.0.0 --precise 2.2.0
+
       - name: Run unit tests
         run: cargo test --release
 
