@@ -31,13 +31,10 @@ import {IResolverRegistry} from "./interfaces/IResolverRegistry.sol";
 ///            ability of users to claim or refund: those paths are
 ///            always permissionless.
 ///
-/// @dev The contract verifies preimages using BOTH sha256 (interop with
-///      Stellar/Soroban which uses sha256) and keccak256 (matching
-///      classic Ethereum HTLC convention). Callers commit to a single
-///      `hashlock` and the preimage is accepted iff *either* digest
-///      matches it. This lets a single Soroban / Ethereum cross-chain
-///      swap use one hashlock end-to-end while keeping the contract
-///      compatible with EVM tooling that expects keccak.
+/// @dev Cross-chain hashlocks use sha256(abi.encodePacked(orderId,
+///      preimage)); the order id is uint256-encoded as 32-byte big-endian.
+///      This matches the Soroban implementation and prevents a preimage
+///      from being replayed against a different order.
 contract HTLCEscrow is IHTLCEscrow, ReentrancyGuard {
     using SafeERC20 for IERC20;
 
@@ -184,12 +181,12 @@ contract HTLCEscrow is IHTLCEscrow, ReentrancyGuard {
         }
         if (block.timestamp > order.timelock) revert Expired();
 
-        // Verify hashlock. We accept both sha256 and keccak256 digests
-        // so that a Soroban-side counterpart (sha256) and a classic EVM
-        // counterparty (keccak256) can share the same on-chain hashlock.
-        bytes32 sha = sha256(preimage);
+        if (preimage.length == 0) revert InvalidPreimage();
+
+        // Hashlock v1: SHA256(uint256 orderId, big-endian || preimage bytes).
+        bytes32 sha = sha256(abi.encodePacked(orderId, preimage));
         bytes32 kek = keccak256(preimage);
-        if (sha != order.hashlock && kek != order.hashlock) revert InvalidPreimage();
+        if (sha != order.hashlock) revert InvalidPreimage();
 
         order.status = OrderStatus.Claimed;
         order.finalisedAt = uint64(block.timestamp);

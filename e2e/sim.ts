@@ -1,5 +1,4 @@
-import { keccak256, sha256 } from "viem";
-import { assertValidSecretFormat } from "@oversync/sdk/secrets";
+import { hashOrderPreimage } from "@oversync/sdk/secrets";
 
 export type Hex = `0x${string}`;
 
@@ -43,6 +42,7 @@ export interface HtlcSim {
   claimOrder(id: bigint, preimage: Hex): void;
   refundOrder(id: bigint): void;
   getOrder(id: bigint): OrderView;
+  nextOrderId(): bigint;
   advanceTime(seconds: number): void;
 }
 
@@ -62,6 +62,10 @@ abstract class BaseHtlcSim {
 
   advanceTime(seconds: number): void {
     this.now += seconds;
+  }
+
+  nextOrderId(): bigint {
+    return this.nextId;
   }
 
   createOrder(input: CreateOrderInput): bigint {
@@ -105,11 +109,7 @@ abstract class BaseHtlcSim {
 }
 
 /**
- * Faithful re-encoding of HTLCEscrow.sol's claim/refund branch logic.
- * The contract accepts a preimage if EITHER sha256(preimage) OR
- * keccak256(preimage) equals the stored hashlock, which is how a
- * single hashlock can interop with Soroban (sha256-only) and classic
- * keccak-flavoured EVM counterparties.
+ * Faithful re-encoding of HTLCEscrow.sol's order-bound claim logic.
  */
 export class EvmHtlcSim extends BaseHtlcSim implements HtlcSim {
   readonly name = "evm" as const;
@@ -118,14 +118,10 @@ export class EvmHtlcSim extends BaseHtlcSim implements HtlcSim {
     const o = this.getMutable(id);
     if (o.status !== "Funded") throw new SimError("OrderNotClaimable");
     if (this.now > o.timelockAbsolute) throw new SimError("Expired");
-    try {
-      assertValidSecretFormat(preimage, "preimage");
-    } catch {
+    if (!/^0x(?:[0-9a-fA-F]{2})+$/.test(preimage)) {
       throw new SimError("InvalidPreimage");
     }
-    const sha = sha256(preimage);
-    const kek = keccak256(preimage);
-    if (sha !== o.hashlock && kek !== o.hashlock) {
+    if (hashOrderPreimage(id, preimage) !== o.hashlock) {
       throw new SimError("InvalidPreimage");
     }
     o.status = "Claimed";
@@ -135,8 +131,7 @@ export class EvmHtlcSim extends BaseHtlcSim implements HtlcSim {
 
 /**
  * Faithful re-encoding of the Soroban oversync-htlc claim branch. The
- * Soroban contract accepts a preimage only when sha256(preimage) equals
- * the stored hashlock — keccak256 is not consulted.
+ * Soroban contract uses the same order-bound SHA-256 hashlock as EVM.
  */
 export class SorobanHtlcSim extends BaseHtlcSim implements HtlcSim {
   readonly name = "soroban" as const;
@@ -145,13 +140,10 @@ export class SorobanHtlcSim extends BaseHtlcSim implements HtlcSim {
     const o = this.getMutable(id);
     if (o.status !== "Funded") throw new SimError("OrderNotClaimable");
     if (this.now > o.timelockAbsolute) throw new SimError("Expired");
-    try {
-      assertValidSecretFormat(preimage, "preimage");
-    } catch {
+    if (!/^0x(?:[0-9a-fA-F]{2})+$/.test(preimage)) {
       throw new SimError("InvalidPreimage");
     }
-    const sha = sha256(preimage);
-    if (sha !== o.hashlock) {
+    if (hashOrderPreimage(id, preimage) !== o.hashlock) {
       throw new SimError("InvalidPreimage");
     }
     o.status = "Claimed";
