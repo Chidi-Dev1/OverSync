@@ -20,7 +20,9 @@ async function main(): Promise<void> {
   const repo = new OrdersRepository(db);
 
   if (cfg.demoFixtures) {
-    await seedDemoFixtures(repo, log);
+    // Pass the network passphrase so the loader can refuse mainnet itself
+    // before touching the database (#279).
+    await seedDemoFixtures(repo, log, cfg.soroban.networkPassphrase);
   }
 
   const quotes = new QuoteService(log);
