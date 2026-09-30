@@ -18,6 +18,7 @@ participant, not a privileged operator.
 - Soroban registry: [`soroban/contracts/resolver-registry/src/lib.rs`](../soroban/contracts/resolver-registry/src/lib.rs).
 - Resolver runner: [`resolver/`](../resolver/), Docker image: [`resolver/Dockerfile`](../resolver/Dockerfile), guide: [`docs/RESOLVERS.md`](RESOLVERS.md).
 - The HTLC contracts have **no admin escape hatch** — verified by the test `non-custodial guarantees > contract has no admin escape hatch` in [`contracts/test/v2/HTLCEscrow.test.ts`](../contracts/test/v2/HTLCEscrow.test.ts).
+- New `MainnetHTLC` deployments use the same active-resolver gate at order creation and the same permissionless claim/refund, preimage, and expiry rules as v2. The shared fixture in [`contracts/test/v2/MainnetHTLCParity.test.ts`](../contracts/test/v2/MainnetHTLCParity.test.ts) checks both contracts. This source change does not alter previously deployed v1 bytecode; migration requires a new deployment.
 - Full trust analysis: [`docs/TRUST_MODEL.md`](TRUST_MODEL.md).
 
 ---
