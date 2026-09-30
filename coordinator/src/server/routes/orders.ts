@@ -94,7 +94,7 @@ export function ordersRoutes(orders: OrderService): Router {
     if (cursorParam) {
       const result = cursorSchema.safeParse({ cursor: cursorParam });
       if (!result.success) {
-        res.status(400).json({ error: "invalid_cursor", message: result.error.errors[0].message });
+        res.status(400).json({ error: "invalid_cursor", message: result.error?.errors[0]?.message ?? "Invalid cursor format" });
         return;
       }
       const decoded = decodeCursor(cursorParam);
@@ -102,15 +102,13 @@ export function ordersRoutes(orders: OrderService): Router {
         res.status(400).json({ error: "invalid_cursor", message: "Failed to decode cursor" });
         return;
       }
-      cursor = result.data;
-      if (!validateCursor(cursor)) {
+      // Use decoded properties for cursor logic
+      if (!validateCursor({ ...decoded, network: "unknown", user: address })) {
         res.status(400).json({ error: "invalid_cursor", message: "Cursor from another user or network" });
         return;
       }
       // For next page (older orders): filter out orders at or before the cursor timestamp
-      createdAtLessThan = cursor.createdAt;
-    } else {
-      cursor = null;
+      createdAtLessThan = decoded.createdAt;
     }
 
     try {
@@ -119,9 +117,11 @@ export function ordersRoutes(orders: OrderService): Router {
 
       // Build next cursor from the last order in the page (oldest order on the page)
       let nextCursor: string | undefined;
-      if (transactions.length > 0) {
+      if (transactions.length > 0 && list.length > 0) {
         const lastOrder = list[list.length - 1];
-        nextCursor = encodeCursor(lastOrder.createdAt, lastOrder.publicId);
+        if (lastOrder) {
+          nextCursor = encodeCursor(lastOrder.createdAt, lastOrder.publicId);
+        }
       }
 
       res.json({

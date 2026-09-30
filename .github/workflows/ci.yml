@@ -81,11 +81,6 @@ jobs:
         with:
           targets: wasm32-unknown-unknown,wasm32v1-none
 
-      - name: Install Stellar CLI
-        run: |
-          cargo install --locked stellar-cli --version 22.8.1 || true
-          stellar --version
-
       - name: Cache cargo
         uses: actions/cache@v4
         with:
@@ -94,6 +89,11 @@ jobs:
             ~/.cargo/git
             soroban/target
           key: soroban-${{ runner.os }}-${{ hashFiles('soroban/Cargo.toml', 'soroban/contracts/**/Cargo.toml') }}
+
+      - name: Install Stellar CLI
+        run: |
+          cargo install --locked stellar-cli --version 22.8.1 || true
+          stellar --version
 
       - name: Build WASM
         run: stellar contract build
