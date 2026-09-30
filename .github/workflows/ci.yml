@@ -54,6 +54,12 @@ jobs:
       - name: Typecheck — frontend
         run: pnpm --filter @oversync/frontend exec tsc --noEmit
 
+      - name: Typecheck — relayer
+        run: pnpm --filter @oversync/relayer exec tsc --noEmit
+
+      - name: Lint — relayer
+        run: pnpm --filter @oversync/relayer lint
+
       - name: Test — SDK
         run: pnpm --filter @oversync/sdk test
 
@@ -62,6 +68,12 @@ jobs:
 
       - name: Test — coordinator
         run: pnpm --filter @oversync/coordinator test
+
+      # The relay submission tracker is the single door for every order-scoped
+      # on-chain submission, so its unit tests are a settlement-safety gate.
+      # They are pure: no Horizon server, no JSON-RPC provider, no live chain.
+      - name: Test — relayer
+        run: pnpm --filter @oversync/relayer test
 
       - name: Compile contracts
         run: pnpm --filter @oversync/contracts compile
