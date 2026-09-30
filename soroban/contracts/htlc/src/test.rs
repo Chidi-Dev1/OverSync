@@ -30,17 +30,15 @@ fn hashlock_order_one(env: &Env, preimage: &Bytes) -> BytesN<32> {
     hashlock_for_order(env, 1, preimage)
 }
 
-fn decode_hex(value: &str) -> std::vec::Vec<u8> {
-    value
-        .strip_prefix("0x")
-        .unwrap()
-        .as_bytes()
-        .chunks_exact(2)
-        .map(|pair| {
-            let pair = core::str::from_utf8(pair).unwrap();
-            u8::from_str_radix(pair, 16).unwrap()
-        })
-        .collect()
+fn decode_hex32(value: &str) -> [u8; 32] {
+    let digits = value.strip_prefix("0x").unwrap().as_bytes();
+    assert_eq!(digits.len(), 64);
+    let mut decoded = [0u8; 32];
+    for (index, byte) in decoded.iter_mut().enumerate() {
+        let pair = core::str::from_utf8(&digits[index * 2..index * 2 + 2]).unwrap();
+        *byte = u8::from_str_radix(pair, 16).unwrap();
+    }
+    decoded
 }
 
 fn setup(env: &Env, min_safety_deposit: i128) -> (Address, HtlcContractClient<'_>) {
@@ -139,8 +137,8 @@ fn shared_hashlock_vector_is_accepted() {
         .unwrap();
     let mut fields = vector.split('\t');
     let expected_order_id: u64 = fields.next().unwrap().parse().unwrap();
-    let preimage_bytes = decode_hex(fields.next().unwrap());
-    let expected_hashlock: [u8; 32] = decode_hex(fields.next().unwrap()).try_into().unwrap();
+    let preimage_bytes = decode_hex32(fields.next().unwrap());
+    let expected_hashlock = decode_hex32(fields.next().unwrap());
 
     let env = Env::default();
     env.mock_all_auths();
@@ -149,7 +147,7 @@ fn shared_hashlock_vector_is_accepted() {
     let (_admin, htlc) = setup(&env, 0);
     let sender = Address::generate(&env);
     let beneficiary = Address::generate(&env);
-    let preimage = Bytes::from_slice(&env, &preimage_bytes);
+    let preimage = Bytes::from_array(&env, &preimage_bytes);
     let hashlock = hashlock_for_order(&env, expected_order_id, &preimage);
 
     assert_eq!(hashlock, BytesN::from_array(&env, &expected_hashlock));
