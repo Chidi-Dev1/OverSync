@@ -10,10 +10,9 @@ import { buildHtlcReceipt } from '../lib/parseHtlcReceipt';
 import type { Address } from 'viem';
 import HtlcTimeline from './HtlcTimeline';
 import {
-  fetchCoordinatorOrders,
   isRealHash,
   isRealTransaction,
-  mergeTransactions,
+  mapCoordinatorOrderToTransaction,
   type Transaction,
 } from '../lib/orderRecovery';
 
@@ -101,7 +100,7 @@ export default function TransactionHistory({ ethAddress, stellarAddress }: Trans
       if (ethAddress) params.set('eth', ethAddress);
       if (stellarAddress) params.set('stellar', stellarAddress);
       if (cursor) params.set('cursor', cursor);
-      const res = await fetch(`${apiBase}/api/orders/history?${params.toString()}`);
+      const res = await fetch(`${API_BASE_URL}/api/orders/history?${params.toString()}`);
       if (!res.ok) throw new Error(`Coordinator returned ${res.status}`);
       const body = await res.json();
       const remote: Transaction[] = Array.isArray(body?.transactions)
@@ -112,9 +111,6 @@ export default function TransactionHistory({ ethAddress, stellarAddress }: Trans
       for (const tx of local) byId.set(tx.id, tx);
       for (const tx of remote) byId.set(tx.id, tx);
       const merged = Array.from(byId.values()).sort((a, b) => b.timestamp - a.timestamp);
-
-      const remote = await fetchCoordinatorOrders(API_BASE_URL, { ethAddress, stellarAddress });
-      const merged = mergeTransactions(local, remote);
 
       localStorage.setItem(STORAGE_KEY, JSON.stringify(merged));
       setTransactions(merged);
