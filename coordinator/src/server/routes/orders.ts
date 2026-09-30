@@ -2,8 +2,13 @@ import { Router } from "express";
 import { z } from "zod";
 import type { OrderRow, OrderSnapshot } from "../../persistence/orders-repo.js";
 import { announceSchema, OrderService, OrderValidationError } from "../../services/order-service.js";
-import { cursorSchema, encodeCursor, decodeCursor, validateCursor, type Cursor } from "./cursor-utils.js";
-import { encodeCursor, decodeCursor } from "./cursor-utils.js";
+import {
+  cursorSchema,
+  encodeCursor,
+  decodeCursor,
+  validateCursor,
+  type Cursor,
+} from "./cursor-utils.js";
 
 function orderValidationResponse(err: OrderValidationError): { status: number; body: Record<string, unknown> } {
   if (err.code === "TIMELOCKS_REVERSED" || err.code === "GAP_TOO_SMALL") {
@@ -156,7 +161,7 @@ export function ordersRoutes(orders: OrderService): Router {
   });
 
   // Parameterized routes come AFTER specific routes
-  router.get("/orders/:id", async (req, res, next) => {
+router.get("/orders/:id", async (req, res, next) => {
     const id = req.params.id;
     try {
       const order = await orders.get(id);
@@ -165,66 +170,6 @@ export function ordersRoutes(orders: OrderService): Router {
         return;
       }
       res.json(serialiseOrder(order));
-    } catch (err) {
-      next(err);
-    }
-  });
-  router.get("/orders/history", async (req, res, next) => {
-    const address = (req.query.address as string | undefined) ?? "";
-    if (!address) {
-      res.status(400).json({ error: "address_required" });
-      return;
-    }
-    const cursorParam = req.query.cursor as string | undefined;
-    let limit = Math.min(Number(req.query.limit ?? 50), 200);
-    if (limit < 1) limit = 1;
-
-    let createdAtGreaterThan: number | undefined;
-    let createdAtLessThan: number | undefined;
-
-    if (cursorParam) {
-      const result = cursorSchema.safeParse({ cursor: cursorParam });
-      if (!result.success) {
-        res.status(400).json({ error: "invalid_cursor", message: result.error?.errors[0]?.message ?? "Invalid cursor format" });
-        return;
-      }
-      const decoded = decodeCursor(cursorParam);
-      if (!decoded) {
-        res.status(400).json({ error: "invalid_cursor", message: "Failed to decode cursor" });
-        return;
-      }
-      // Use decoded properties for cursor logic
-      if (!validateCursor({ ...decoded, network: "unknown", user: address })) {
-        res.status(400).json({ error: "invalid_cursor", message: "Cursor from another user or network" });
-        return;
-      }
-      // For next page (older orders): filter out orders at or before the cursor timestamp
-      createdAtLessThan = decoded.createdAt;
-    }
-
-    try {
-      const list = await orders.history(address, limit, 0, createdAtGreaterThan, createdAtLessThan);
-      const transactions = list.map((o) => serialiseOrder(o)).filter(Boolean);
-
-      // Build next cursor from the last order in the page (oldest order on the page)
-      let nextCursor: string | undefined;
-      if (transactions.length > 0 && list.length > 0) {
-        const lastOrder = list[list.length - 1];
-        if (lastOrder) {
-          nextCursor = encodeCursor(lastOrder.createdAt, lastOrder.publicId);
-        }
-      }
-
-      res.json({
-        transactions,
-        pagination: { limit, count: transactions.length, nextCursor }
-      });
-
-  router.get("/orders/:id/transitions", async (req, res, next) => {
-    try {
-      const transitions = await orders.getTransitions(req.params.id);
-      res.json({ transitions });
-
     } catch (err) {
       next(err);
     }

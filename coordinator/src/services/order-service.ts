@@ -181,16 +181,25 @@ export class OrderService {
   get(publicId: string): Promise<OrderRow | null> {
     return this.repo.findByPublicId(publicId);
   }
-  history(address: string, limit?: number, offset?: number, createdAtGreaterThan?: number, createdAtLessThan?: number): Promise<OrderRow[]> {
-    return this.repo.findByAddress(address, limit, offset, createdAtGreaterThan, createdAtLessThan);
+
+  history(
+    address: string,
+    limit?: number,
+    offset?: number,
+    createdAtGreaterThan?: number,
+    createdAtLessThan?: number,
+  ): Promise<OrderRow[]> {
+    return this.repo.findByAddress(
+      address,
+      limit,
+      offset,
+      createdAtGreaterThan,
+      createdAtLessThan,
+    );
+  }
 
   getTransitions(publicId: string): Promise<OrderTransitionSummary[]> {
     return this.repo.getTransitions(publicId);
-  }
-
-  history(address: string, limit?: number, offset?: number): Promise<OrderRow[]> {
-    return this.repo.findByAddress(address, limit, offset);
-
   }
 
   findByHashlock(hashlock: string): Promise<OrderRow | null> {
