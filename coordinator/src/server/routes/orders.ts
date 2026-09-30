@@ -1,8 +1,17 @@
 import { Router } from "express";
 import { z } from "zod";
-import type { OrderRow } from "../../persistence/orders-repo.js";
+import type { OrderRow, OrderSnapshot } from "../../persistence/orders-repo.js";
 import { announceSchema, OrderService, OrderValidationError } from "../../services/order-service.js";
 import { cursorSchema, encodeCursor, decodeCursor, validateCursor, type Cursor } from "./cursor-utils.js";
+import { encodeCursor, decodeCursor } from "./cursor-utils.js";
+
+function orderValidationResponse(err: OrderValidationError): { status: number; body: Record<string, unknown> } {
+  if (err.code === "TIMELOCKS_REVERSED" || err.code === "GAP_TOO_SMALL") {
+    return { status: 400, body: { error: "timelock_ordering_invalid", code: err.code } };
+  }
+  return { status: 400, body: { error: "order_validation_error", message: err.message } };
+}
+
 
 function serialiseOrder(order: OrderRow | null) {
   if (!order) return null;
@@ -57,13 +66,96 @@ export function ordersRoutes(orders: OrderService): Router {
         return;
       }
       if (err instanceof OrderValidationError) {
-        res.status(400).json({ error: "order_validation_error", message: err.message });
+        const { status, body } = orderValidationResponse(err);
+        res.status(status).json(body);
         return;
       }
       next(err);
     }
   });
 
+  // IMPORTANT: Specific routes must come BEFORE parameterized routes
+  router.get("/orders/history", async (req, res, next) => {
+    const address = (req.query.address as string | undefined) ?? "";
+    if (!address) {
+      res.status(400).json({ error: "address_required" });
+      return;
+    }
+
+    // Validate and parse limit
+    const limitStr = req.query.limit as string | undefined;
+    const limit = limitStr ? Number(limitStr) : 50;
+    if (!Number.isInteger(limit) || limit < 1 || limit > 200) {
+      res.status(400).json({ error: "invalid_limit", message: "limit must be an integer between 1 and 200" });
+      return;
+    }
+
+    // Validate and decode cursor (optional)
+    let offset = 0;
+    const cursorStr = req.query.cursor as string | undefined;
+    if (cursorStr) {
+      const decoded = decodeCursor(cursorStr);
+      if (!decoded) {
+        res.status(400).json({ error: "invalid_cursor", message: "cursor is malformed or expired" });
+        return;
+      }
+      offset = decoded.offset;
+    }
+
+    try {
+      // Fetch limit + 1 to detect if more rows exist
+      const list = await orders.history(address, limit + 1, offset);
+      const hasMore = list.length > limit;
+      const rows = hasMore ? list.slice(0, limit) : list;
+
+      // Generate next cursor if there are more rows
+      let nextCursor: string | null = null;
+      if (hasMore && rows.length > 0) {
+        const lastRow = rows[rows.length - 1];
+        if (lastRow) {
+          nextCursor = encodeCursor({ offset: offset + limit, createdAt: lastRow.createdAt });
+        }
+      }
+
+      res.json({
+        transactions: rows.map((o) => serialiseOrder(o)).filter(Boolean),
+        pagination: {
+          limit,
+          cursor: cursorStr ?? null,
+          nextCursor,
+          hasMore
+        }
+      });
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  router.get("/orders/snapshot", async (_req, res, next) => {
+    try {
+      const snapshots = await orders.getSnapshots();
+      res.json({ snapshots });
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  router.get("/orders/:id/transitions", async (req, res, next) => {
+    const id = req.params.id;
+    try {
+      const order = await orders.get(id);
+      if (!order) {
+        res.status(404).json({ error: "not_found" });
+        return;
+      }
+      const transitions = await orders.getTransitions(id);
+      res.json({ transitions });
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  // Parameterized routes come AFTER specific routes
   router.get("/orders/:id", async (req, res, next) => {
     const id = req.params.id;
     try {
@@ -77,7 +169,6 @@ export function ordersRoutes(orders: OrderService): Router {
       next(err);
     }
   });
-
   router.get("/orders/history", async (req, res, next) => {
     const address = (req.query.address as string | undefined) ?? "";
     if (!address) {
@@ -128,6 +219,12 @@ export function ordersRoutes(orders: OrderService): Router {
         transactions,
         pagination: { limit, count: transactions.length, nextCursor }
       });
+
+  router.get("/orders/:id/transitions", async (req, res, next) => {
+    try {
+      const transitions = await orders.getTransitions(req.params.id);
+      res.json({ transitions });
+
     } catch (err) {
       next(err);
     }
@@ -151,7 +248,8 @@ export function ordersRoutes(orders: OrderService): Router {
         return;
       }
       if (err instanceof OrderValidationError) {
-        res.status(400).json({ error: "order_validation_error", message: err.message });
+        const { status, body } = orderValidationResponse(err);
+        res.status(status).json(body);
         return;
       }
       next(err);
@@ -176,7 +274,8 @@ export function ordersRoutes(orders: OrderService): Router {
         return;
       }
       if (err instanceof OrderValidationError) {
-        res.status(400).json({ error: "order_validation_error", message: err.message });
+        const { status, body } = orderValidationResponse(err);
+        res.status(status).json(body);
         return;
       }
       next(err);

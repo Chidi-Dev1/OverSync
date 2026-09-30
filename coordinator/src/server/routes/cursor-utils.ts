@@ -1,5 +1,4 @@
 import { z } from "zod";
-
 const HEX64 = /^0x[0-9a-fA-F]{64}$/;
 const HEX40 = /^0x[a-fA-F0-9]{40}$/;
 
@@ -37,11 +36,31 @@ export function decodeCursor(encoded: string): { createdAt: number; publicId: st
     const parsedCreatedAt = parseFloat(createdAt);
     if (isNaN(parsedCreatedAt)) return null;
     return { createdAt: parsedCreatedAt, publicId };
+
+/**
+ * Cursor utilities for stable pagination.
+ * Cursor = base64-encoded JSON of {offset, createdAt} for stable offset-based pagination.
+ */
+
+export interface CursorData {
+  offset: number;
+  createdAt: number;
+}
+
+/** Encode cursor to base64 string */
+export function encodeCursor(data: CursorData): string {
+  return Buffer.from(JSON.stringify(data)).toString("base64");
+}
+
+/** Decode cursor from base64 string */
+export function decodeCursor(cursor: string): CursorData | null {
+  try {
+    const decoded = Buffer.from(cursor, "base64").toString("utf-8");
+    return JSON.parse(decoded);
   } catch {
     return null;
   }
 }
-
 export function validateCursor(cursor: { createdAt: number; publicId: string; network: string; user: string }): boolean {
   const { createdAt, publicId, network, user } = cursor;
   if (isNaN(createdAt)) return false;
@@ -50,3 +69,4 @@ export function validateCursor(cursor: { createdAt: number; publicId: string; ne
   if (!user || !user.startsWith("0x")) return false;
   return true;
 }
+r
