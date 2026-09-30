@@ -31,6 +31,8 @@ const artifactPath = join(
 
 const AMOUNT = ethers.parseEther("0.5");
 const SAFETY_DEPOSIT = 0n;
+/** The escrow value locked per order, exported so tests can assert balances. */
+export const ESCROW_AMOUNT = AMOUNT;
 const ZERO_ADDR = ethers.ZeroAddress;
 const HARDHAT_RPC = "http://127.0.0.1:8545";
 const DEPLOYER_KEY =
@@ -45,8 +47,20 @@ export interface RealEvmHtlcFixture {
   claimOrder(orderId: bigint, preimage: Hex): Promise<void>;
   claimOrderExpectRevert(orderId: bigint, preimage: Hex): Promise<string>;
   getOrderStatus(orderId: bigint): Promise<"Funded" | "Claimed" | "Refunded">;
+  /** Total ETH currently held in escrow by the deployed contract. */
+  getEscrowBalance(): Promise<bigint>;
   stop(): Promise<void>;
 }
+
+/**
+ * The canonical Hardhat/Anvil dev accounts used by this fixture. These are
+ * publicly documented test keys with no real funds — the suite never uses a
+ * mainnet key. Exported so tests can assert that invariant.
+ */
+export const HARDHAT_TEST_KEYS = {
+  deployer: DEPLOYER_KEY,
+  beneficiary: BENEFICIARY_KEY
+} as const;
 
 const STATUS_MAP = ["Funded", "Claimed", "Refunded"] as const;
 
@@ -190,6 +204,10 @@ export async function startEvmFixture(): Promise<RealEvmHtlcFixture> {
     async getOrderStatus(orderId: bigint): Promise<"Funded" | "Claimed" | "Refunded"> {
       const order = await escrow.getOrder(orderId);
       return STATUS_MAP[Number(order.status)];
+    },
+
+    async getEscrowBalance(): Promise<bigint> {
+      return await provider.getBalance(contractAddress);
     },
 
     async stop(): Promise<void> {
