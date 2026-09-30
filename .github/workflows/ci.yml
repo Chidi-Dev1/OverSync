@@ -108,9 +108,12 @@ jobs:
             soroban/target
           key: soroban-${{ runner.os }}-${{ hashFiles('soroban/Cargo.toml', 'soroban/contracts/**/Cargo.toml') }}
 
+      - name: Install cargo-binstall
+        uses: cargo-bins/cargo-binstall@main
+
       - name: Install Stellar CLI
         run: |
-          cargo install --locked stellar-cli --version 22.8.1 || true
+          cargo binstall -y stellar-cli --version 22.8.1
           stellar --version
 
       - name: Build WASM
