@@ -445,8 +445,23 @@ export class OrdersRepository {
     return row ? rowToOrder(row) : null;
   }
 
-  async findByAddress(addr: string, limit = 50, offset = 0): Promise<OrderRow[]> {
-    const rows = await this.all<OrderDbRow>(this.byAddress, { addr, limit, offset });
+  async findByAddress(addr: string, limit = 50, offset = 0, createdAtGreaterThan?: number, createdAtLessThan?: number): Promise<OrderRow[]> {
+    let sql = `SELECT * FROM orders WHERE src_address = :addr OR dst_address = :addr`;
+    const params: any = { addr, limit, offset };
+    
+    if (createdAtGreaterThan !== undefined) {
+      sql = sql + " AND created_at > :created_at";
+      params.created_at = createdAtGreaterThan;
+    }
+    if (createdAtLessThan !== undefined) {
+      sql = sql + " AND created_at < :created_at";
+      params.created_at = createdAtLessThan;
+    }
+    
+    sql = sql + " LIMIT :limit OFFSET :offset";
+    
+    const stmt = this.db.prepare(sql);
+    const rows = await this.all<OrderDbRow>(stmt, params);
     return rows.map(rowToOrder);
   }
 
