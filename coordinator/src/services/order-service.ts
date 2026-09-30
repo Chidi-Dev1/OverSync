@@ -12,7 +12,12 @@ import {
 } from "../persistence/orders-repo.js";
 import { canTransition } from "../state-machine/order-machine.js";
 import { ordersTotal } from "../metrics.js";
-import { QuoteService, QuoteExpiredError, QuoteNotFoundError } from "./quote-service.js";
+import {
+  QuoteService,
+  QuoteExpiredError,
+  QuoteNotFoundError,
+  QuoteAmountMismatchError
+} from "./quote-service.js";
 import { loadConfig } from "../config.js";
 import {
   validateTimelocksAtCreation,
@@ -148,10 +153,14 @@ export class OrderService {
         this.log.debug({ quoteId: input.quoteId }, "quoteId supplied but no QuoteService wired; skipping freshness check");
       } else {
         try {
-          this.quoteService.assertFresh(input.quoteId);
+          this.quoteService.assertFresh(input.quoteId, input.srcAmount);
           this.log.debug({ quoteId: input.quoteId }, "quote freshness confirmed");
         } catch (err) {
-          if (err instanceof QuoteExpiredError || err instanceof QuoteNotFoundError) {
+          if (
+            err instanceof QuoteExpiredError ||
+            err instanceof QuoteNotFoundError ||
+            err instanceof QuoteAmountMismatchError
+          ) {
             throw new OrderValidationError(err.message);
           }
           throw err;
