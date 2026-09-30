@@ -275,7 +275,9 @@ export class OrderService {
     const order = await this.repo.findByPublicId(publicId);
     if (!order) throw new OrderValidationError(`unknown order ${publicId}`);
     if (order.status === "secret_revealed") {
-      if (order.preimage === preimage && order.secretRevealedTx === txHash) return;
+      // The preimage is bound to the hashlock, so the same secret seen again
+      // (another tx, a replayed log) is a duplicate; the first tx is kept.
+      if (order.preimage === preimage) return;
       throw new StaleOrderEventError(`conflicting secret event for ${publicId}`);
     }
     if (!canTransition(order.status, "secret_revealed")) {
@@ -284,6 +286,24 @@ export class OrderService {
     await this.repo.recordSecretRevealed({ publicId, preimage, txHash });
     this.log.info({ publicId }, "secret recorded");
     ordersTotal.inc({ status: "secret_revealed" });
+  }
+
+  /**
+   * Record an on-chain refund. Idempotent: a second refund event for an
+   * order that is already refunded is a no-op, and a refund for an order
+   * that already settled (or never locked) is rejected as stale rather than
+   * moving the order backwards.
+   */
+  async recordRefund(publicId: string, txHash: string): Promise<void> {
+    const order = await this.repo.findByPublicId(publicId);
+    if (!order) throw new OrderValidationError(`unknown order ${publicId}`);
+    if (order.status === "refunded") return;
+    if (!canTransition(order.status, "refunded")) {
+      throw new StaleOrderEventError(`stale refund event for order in status ${order.status}`);
+    }
+    await this.repo.setStatus(publicId, "refunded");
+    this.log.info({ publicId, txHash }, "refund recorded");
+    ordersTotal.inc({ status: "refunded" });
   }
 
   async getOrderMetrics(): Promise<OrderMetrics> {
