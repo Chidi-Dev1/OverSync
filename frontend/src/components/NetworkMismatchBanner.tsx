@@ -6,8 +6,12 @@ import {
   STELLAR_TESTNET_PASSPHRASE,
 } from '../config/networks';
 
+import type { RecoveredOrder } from '../lib/orderRecovery';
+
 interface Props {
   networkState: NetworkModeState;
+  expectedNetwork?: 'testnet' | 'mainnet';
+  order?: RecoveredOrder | null;
 }
 
 const MODE_LABEL: Record<'testnet' | 'mainnet', string> = {
@@ -36,7 +40,11 @@ function describeFreighterNetwork(passphrase: string | null): string {
   return STELLAR_MODE_FROM_PASSPHRASE[passphrase] || passphrase;
 }
 
-export default function NetworkMismatchBanner({ networkState }: Props) {
+export default function NetworkMismatchBanner({
+  networkState,
+  expectedNetwork,
+  order,
+}: Props) {
   const [busy, setBusy] = useState(false);
   const {
     mode,
@@ -52,11 +60,17 @@ export default function NetworkMismatchBanner({ networkState }: Props) {
     refreshWalletNetworks,
   } = networkState;
 
-  if (!hasAnyMismatch) {
+  const targetMode = expectedNetwork ?? order?.networkMode ?? mode;
+  const isOrderNetworkMismatch = Boolean(
+    (expectedNetwork && mode !== expectedNetwork) ||
+    (order?.networkMode && mode !== order.networkMode)
+  );
+
+  if (!hasAnyMismatch && !isOrderNetworkMismatch) {
     return null;
   }
 
-  const expectedLabel = MODE_LABEL[mode];
+  const expectedLabel = MODE_LABEL[targetMode];
   const metamaskActual = describeMetamaskChain(metamaskChainId);
   const freighterActual = describeFreighterNetwork(freighterNetworkPassphrase);
 
@@ -109,10 +123,16 @@ export default function NetworkMismatchBanner({ networkState }: Props) {
         <span className="mt-0.5">⚠</span>
         <div>
           <div className="font-semibold">
-            Your wallet network does not match the app network.
+            {isOrderNetworkMismatch
+              ? 'Your wallet network does not match the order network.'
+              : 'Your wallet network does not match the app network.'}
           </div>
           <div className="text-amber-200/90">
-            App is set to <b>{expectedLabel}</b>.{' '}
+            {isOrderNetworkMismatch ? (
+              <span>Order was created for <b>{expectedLabel}</b>. </span>
+            ) : (
+              <span>App is set to <b>{expectedLabel}</b>. </span>
+            )}
             {metamaskConnected && !metamaskMatches && (
               <span>
                 Ethereum wallet is on <b>{metamaskActual}</b>
