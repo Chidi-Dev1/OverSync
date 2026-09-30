@@ -498,28 +498,90 @@ relayer process and:
 1. Every **60 seconds**, scans the in-memory `activeOrders` map.
 2. For each `direction = 'xlm_to_eth'` order with `xlmReceivedAt`
    older than **5 minutes** and no `ethTxHash` recorded, triggers
-   the same refund helper as layer 6.3.
+   the same refund helper as layer 6.3 — submitted through the layer 6.5
+   tracker, so it shares the order's single-flight slot with the inline
+   handler and the request paths. If the order already has a live or
+   settled ETH release, the refund is **refused** rather than paid.
 3. Stamps successful refunds with `status = 'refunded'`,
    `refundTxHash`, `refundedAt` so a subsequent tick does not
    double-pay.
 4. On refund failure, sets `watchdogFailedAt` and backs off for 10
-   minutes before retrying. Errors are logged per-order but never
+   minutes before retrying. A refund whose transaction is already
+   broadcast but unconfirmed is *not* retried: the next tick reconciles
+   the stored hash instead. Errors are logged per-order but never
    thrown into the event loop.
 
-The watchdog uses the same `refundXlmToUser` helper as the inline
+The watchdog uses the same `prepareXlmRefund` helper as the inline
 path, so the refund amount logic and signing key are identical.
 
-### 6.5 Coverage matrix
+### 6.5 Single-flight submission tracker
 
-| Failure mode | Layer 6.1 (on-chain) | Layer 6.2 (UI) | Layer 6.3 (inline) | Layer 6.4 (watchdog) |
-|---|---|---|---|---|
-| ETH→XLM user never claims | ✅ refund after `timelock_eth` | ✅ one-click button surfaces | n/a | n/a |
-| ETH→XLM resolver never fills | ✅ refund after `timelock_eth` | ✅ one-click button surfaces | n/a | n/a |
-| XLM→ETH ETH RPC fails mid-request | ⚠️ no HTLC on XLM side in v1 path | n/a | ✅ refund in same HTTP response | n/a |
-| XLM→ETH user closes tab post-payment | ⚠️ same as above | n/a | n/a | ✅ refund within ~6 min |
-| XLM→ETH relayer restarts mid-flight | ⚠️ same as above | n/a | n/a | ✅ refund within ~6 min |
-| Coordinator entirely offline | ✅ user calls refund directly | ✅ frontend works without coordinator | n/a | n/a |
-| Relayer entirely offline | ✅ user calls refund directly | ✅ frontend works without relayer | n/a | n/a |
+The request handlers, the recovery service and the watchdog are three
+independent code paths, and each of them can move funds. Before this
+layer existed they could move funds *for the same order at the same
+time*: an ETH release that timed out on the RPC could be refunded by the
+inline handler while the transaction was still in the mempool, and a
+retry after a redeploy looked exactly like a first attempt.
+
+[`relayer/src/relay-submission-tracker.ts`](relayer/src/relay-submission-tracker.ts)
+is the single door they all share. Per `(orderId, side, action)`:
+
+1. **One slot per order + side + action.** The key deliberately excludes
+   the amount, the destination and any extra fields, so a re-priced or
+   re-derived attempt of the same action cannot fork into a second
+   transaction. Chain and network are *recorded* on the record, not keyed
+   on.
+2. **One action per order.** A submission holds an order-level lock on
+   `(orderId, side)`. A second, different action — a refund while a
+   claim is unconfirmed, or a claim after a refund settled — is refused
+   with `RelayOrderBusyError` before anything is signed. Only a
+   terminally failed submission releases the lock, so the recovery path
+   can still take over.
+3. **Hash before broadcast.** Submissions are staged in two phases: the
+   caller computes the transaction hash locally (Stellar: the envelope
+   signature-base digest, which is signature-independent; Ethereum:
+   `keccak256` of the locally signed payload), and only then may it
+   broadcast. The tracker persists `txHash` + `network` + `status =
+   pending` **before** the broadcast closure runs, so a crash mid-broadcast
+   still leaves a hash to reconcile.
+4. **Retry attaches to the hash.** Once a hash exists the stager is never
+   called again. The retry budget is spent polling that hash through the
+   `confirm` hook until it reaches a terminal state:
+   - `succeeded` → done, result cached;
+   - `failed` → terminal failure, the order lock is released;
+   - `pending` → the budget can be exhausted while the record stays
+     `pending` and the order lock stays **held** (the funds may still
+     land, so no refund may race it). Callers get HTTP `202` and poll;
+   - `not_found` → no node ever saw the hash, so nothing moved; the
+     record fails and the lock is released.
+5. **Restart safety.** Records are written to a
+   [`relay-submission-store.ts`](relayer/src/relay-submission-store.ts)
+   JSON file (atomic temp-file + rename) on every transition. A settled
+   hash is rehydrated and served from cache, so a redeploy cannot re-pay
+   an order; a broadcast-but-unconfirmed hash is rehydrated as `pending`
+   and polled. A record left `in_flight` by a crash is downgraded to
+   `failed`, because the two-phase contract proves nothing was broadcast
+   without a recorded hash. Disable persistence only with
+   `RELAYER_SUBMISSION_STORE_PATH=off`.
+
+Overlapping callers for the same key join the running submission instead
+of starting their own, so a duplicated request receives *the same hash*
+rather than an error. `/metrics` exposes the tracker under
+`relaySubmissions` (`tracked`, `pendingConfirmations`, `broadcasts`,
+`orderBlocked`, `restored`, `storeErrors`).
+
+### 6.6 Coverage matrix
+
+| Failure mode | Layer 6.1 (on-chain) | Layer 6.2 (UI) | Layer 6.3 (inline) | Layer 6.4 (watchdog) | Layer 6.5 (tracker) |
+|---|---|---|---|---|---|
+| ETH→XLM user never claims | ✅ refund after `timelock_eth` | ✅ one-click button surfaces | n/a | n/a | n/a |
+| ETH→XLM resolver never fills | ✅ refund after `timelock_eth` | ✅ one-click button surfaces | n/a | n/a | n/a |
+| XLM→ETH ETH RPC fails mid-request | ⚠️ no HTLC on XLM side in v1 path | n/a | ✅ refund in same HTTP response | n/a | ✅ refund refused while the release is live |
+| XLM→ETH user closes tab post-payment | ⚠️ same as above | n/a | n/a | ✅ refund within ~6 min | ✅ one refund per order |
+| XLM→ETH relayer restarts mid-flight | ⚠️ same as above | n/a | n/a | ✅ refund within ~6 min | ✅ stored hash polled, never re-broadcast |
+| Duplicate `/process` or `/xlm-to-eth` call | ⚠️ same as above | n/a | n/a | n/a | ✅ same hash returned, one broadcast |
+| Coordinator entirely offline | ✅ user calls refund directly | ✅ frontend works without coordinator | n/a | n/a | n/a |
+| Relayer entirely offline | ✅ user calls refund directly | ✅ frontend works without relayer | n/a | n/a | n/a |
 
 In v2 the XLM→ETH path also goes through the Soroban HTLC, so layer
 6.1 alone is sufficient on both directions and layers 6.3 + 6.4 become
@@ -667,6 +729,9 @@ by the contract invariants.
 | Resolver fills destination then withholds preimage | Resolver's destination-side refund expires first (12h vs 24h). Resolver loses gas + stake-slashable reputation. User refunds source side after 24h. | Funds refunded after worst-case 24h. |
 | User loses the secret | Secret is generated by the SDK; if the user never claims, the order falls through to refund at timelock expiry. | Source funds refunded. |
 | Sepolia/mainnet RPC rate-limited mid-claim | The contract call is idempotent — user can retry. As long as the call lands before `timelock`, the claim succeeds. | No loss. |
+| Relayer broadcasts a claim, then the RPC call times out | The hash is recorded before the broadcast, so the retry polls that hash instead of sending a second transaction. The order lock is held until it settles. | No loss; the payment lands exactly once. |
+| Relayer is redeployed after broadcasting | Records are rehydrated from the submission store: a settled hash is served from cache, an unconfirmed hash is polled. Nothing is re-broadcast. | No loss; no double payment. |
+| Refund is requested while the claim is still unconfirmed | The tracker's order-level lock refuses it (`RelayOrderBusyError` → HTTP 409). The refund is retried once the claim settles or fails terminally. | No loss; the user is never paid both legs. |
 | Soroban network halts past `timelock` | Once the network resumes, anyone can call `refund_order`. The contract has no expiry of the order record. | Funds refunded once network resumes. |
 | Ethereum reorg removes source lock | The destination side has not yet been filled because the resolver waits for source-side finality before locking destination. Resolver simply doesn't fill the reorged order. | No fund loss; order silently expires. |
 | Admin EOA of `ResolverRegistry` is stolen | Attacker can slash legitimate resolvers, redirecting their stakes to `slashBeneficiary`. They cannot touch user HTLC funds. Loss is bounded by total stake at risk. | No user fund loss. Resolver stake loss is bounded; admin should already be a multisig before mainnet (see `docs/TRUST_MODEL.md`). |
@@ -688,6 +753,10 @@ This table is what an auditor should grep against.
 | Stake can only be slashed by registry admin, to `slashBeneficiary` | `ResolverRegistry.slash` is `onlyOwner` and routes to a fixed beneficiary | `slash routes funds to beneficiary, not owner` |
 | Coordinator cannot fabricate orders | Order creation requires an on-chain transaction signed by the user's wallet | (manual / out-of-band; demonstrated in `docs/TRUST_MODEL.md`) |
 | Coordinator cannot replay an old preimage | Each order has a unique `hashlock`; the SDK refuses to reuse a hashlock | SDK test `verifyPreimage` |
+| The relayer can only broadcast one submission per `(orderId, side, action)` | `RelaySubmissionTracker.submit` reserves the key before staging; a stored hash is polled, never re-broadcast | `relayer/test/relay-submission-tracker.test.ts` — "collapses concurrent claims onto a single broadcast and a single hash" |
+| A refund can never race a live claim for the same order | Order-level lock on `(orderId, side)`; a different action is refused with `RelayOrderBusyError` (a `RelayInFlightError`, so callers map it to 409) | `refund-watchdog.test.ts` — "refuses to refund while a claim for the same order is pending"; `recovery-service.test.ts` — "refuses a recovery refund while a claim for the same order is in flight" |
+| A relayer restart cannot resubmit a confirmed payment | `txHash` + `status` persisted atomically before the broadcast; settled records are rehydrated and returned from cache | `relay-submission-tracker.test.ts` — "rehydrates a settled record and serves it from cache" |
+| A crash between "record hash" and "broadcast" cannot orphan an order | The two-phase staging contract makes a hash available before any network call; a record left `in_flight` by a crash is downgraded to `failed`, releasing the lock | `relay-submission-tracker.test.ts` — "releases the order lock when the process died before any hash was recorded" |
 
 ---
 
