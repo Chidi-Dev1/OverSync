@@ -266,7 +266,9 @@ export class OrderService {
     const order = await this.repo.findByPublicId(publicId);
     if (!order) throw new OrderValidationError(`unknown order ${publicId}`);
     if (order.status === "secret_revealed") {
-      if (order.preimage === preimage && order.secretRevealedTx === txHash) return;
+      // Idempotent: same preimage for the same order is always accepted,
+      // even if the txHash differs (e.g. a second chain event observer).
+      if (order.preimage === preimage) return;
       throw new StaleOrderEventError(`conflicting secret event for ${publicId}`);
     }
     if (!canTransition(order.status, "secret_revealed")) {
