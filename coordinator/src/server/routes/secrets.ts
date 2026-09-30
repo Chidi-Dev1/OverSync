@@ -1,8 +1,16 @@
 import { Router } from "express";
 import { z } from "zod";
 import type { SecretService } from "../../services/secret-service.js";
+import type { RequestHandler } from "express";
 
-export function secretsRoutes(secrets: SecretService): Router {
+export interface SecretsRoutesOptions {
+  /** CORS middleware to gate the secret route. */
+  cors?: RequestHandler;
+  /** Readiness rate limit middleware to apply before JSON parsing. */
+  rateLimit?: RequestHandler;
+}
+
+export function secretsRoutes(secrets: SecretService, options: SecretsRoutesOptions = {}): Router {
   const router = Router();
 
   const revealSchema = z.object({
@@ -11,7 +19,11 @@ export function secretsRoutes(secrets: SecretService): Router {
     txHash: z.string().min(1)
   });
 
-  router.post("/secrets/reveal", async (req, res, next) => {
+  const gates: RequestHandler[] = [];
+  if (options.cors) gates.push(options.cors);
+  if (options.rateLimit) gates.push(options.rateLimit);
+
+  router.post("/secrets/reveal", ...gates, async (req, res, next) => {
     try {
       const body = revealSchema.parse(req.body);
       await secrets.reveal(body.publicId, body.preimage, body.txHash);
