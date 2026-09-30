@@ -2,6 +2,7 @@ import { Router } from "express";
 import { z } from "zod";
 import type { OrderRow } from "../../persistence/orders-repo.js";
 import { announceSchema, OrderService, OrderValidationError } from "../../services/order-service.js";
+import { cursorSchema, encodeCursor, decodeCursor, validateCursor, type Cursor } from "./cursor-utils.js";
 
 function serialiseOrder(order: OrderRow | null) {
   if (!order) return null;
@@ -83,13 +84,49 @@ export function ordersRoutes(orders: OrderService): Router {
       res.status(400).json({ error: "address_required" });
       return;
     }
-    const limit = Math.min(Number(req.query.limit ?? 50), 200);
-    const offset = Math.max(Number(req.query.offset ?? 0), 0);
+    const cursorParam = req.query.cursor as string | undefined;
+    let limit = Math.min(Number(req.query.limit ?? 50), 200);
+    if (limit < 1) limit = 1;
+
+    let createdAtGreaterThan: number | undefined;
+    let createdAtLessThan: number | undefined;
+
+    if (cursorParam) {
+      const result = cursorSchema.safeParse({ cursor: cursorParam });
+      if (!result.success) {
+        res.status(400).json({ error: "invalid_cursor", message: result.error.errors[0].message });
+        return;
+      }
+      const decoded = decodeCursor(cursorParam);
+      if (!decoded) {
+        res.status(400).json({ error: "invalid_cursor", message: "Failed to decode cursor" });
+        return;
+      }
+      cursor = result.data;
+      if (!validateCursor(cursor)) {
+        res.status(400).json({ error: "invalid_cursor", message: "Cursor from another user or network" });
+        return;
+      }
+      // For next page (older orders): filter out orders at or before the cursor timestamp
+      createdAtLessThan = cursor.createdAt;
+    } else {
+      cursor = null;
+    }
+
     try {
-      const list = await orders.history(address, limit, offset);
+      const list = await orders.history(address, limit, 0, createdAtGreaterThan, createdAtLessThan);
+      const transactions = list.map((o) => serialiseOrder(o)).filter(Boolean);
+
+      // Build next cursor from the last order in the page (oldest order on the page)
+      let nextCursor: string | undefined;
+      if (transactions.length > 0) {
+        const lastOrder = list[list.length - 1];
+        nextCursor = encodeCursor(lastOrder.createdAt, lastOrder.publicId);
+      }
+
       res.json({
-        transactions: list.map((o) => serialiseOrder(o)).filter(Boolean),
-        pagination: { limit, offset, count: list.length }
+        transactions,
+        pagination: { limit, count: transactions.length, nextCursor }
       });
     } catch (err) {
       next(err);

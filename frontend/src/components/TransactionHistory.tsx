@@ -189,10 +189,13 @@ export default function TransactionHistory({ ethAddress, stellarAddress }: Trans
     }
   }, []);
 
+  const [cursor, setCursor] = useState<string | undefined>();
+
   const refreshFromCoordinator = useCallback(async () => {
     const apiBase = API_BASE_URL;
     if (!ethAddress && !stellarAddress) {
       setTransactions(loadFromStorage());
+      setCursor(undefined);
       return;
     }
     setIsLoading(true);
@@ -200,6 +203,7 @@ export default function TransactionHistory({ ethAddress, stellarAddress }: Trans
       const params = new URLSearchParams();
       if (ethAddress) params.set('eth', ethAddress);
       if (stellarAddress) params.set('stellar', stellarAddress);
+      if (cursor) params.set('cursor', cursor);
       const res = await fetch(`${apiBase}/api/orders/history?${params.toString()}`);
       if (!res.ok) throw new Error(`Coordinator returned ${res.status}`);
       const body = await res.json();
@@ -213,9 +217,15 @@ export default function TransactionHistory({ ethAddress, stellarAddress }: Trans
       const merged = Array.from(byId.values()).sort((a, b) => b.timestamp - a.timestamp);
       localStorage.setItem(STORAGE_KEY, JSON.stringify(merged));
       setTransactions(merged);
+      if (body?.pagination?.nextCursor) {
+        setCursor(body.pagination.nextCursor);
+      } else {
+        setCursor(undefined);
+      }
     } catch (err) {
       console.warn('Coordinator history unavailable, falling back to local cache:', err);
       setTransactions(loadFromStorage());
+      setCursor(undefined);
     } finally {
       setIsLoading(false);
     }
@@ -456,6 +466,17 @@ export default function TransactionHistory({ ethAddress, stellarAddress }: Trans
           </button>
         ))}
       </div>
+
+      {cursor && !isLoading && (
+        <button
+          onClick={refreshFromCoordinator}
+          disabled={isLoading}
+          className="button-hover-scale flex items-center justify-center gap-2 rounded-full border border-cyan-200/30 bg-cyan-200/[0.12] px-4 py-2 text-sm font-semibold text-cyan-50 shadow-[0_12px_34px_rgba(0,226,255,0.12)] transition hover:border-cyan-100/45 hover:bg-cyan-200/[0.18] disabled:opacity-60"
+        >
+          <ArrowRight className={`h-4 w-4 ${isLoading ? 'animate-spin' : ''}`} />
+          Load More
+        </button>
+      )}
 
       <div className="min-h-0 space-y-3 overflow-y-auto overscroll-contain pr-1">
         {filteredTransactions.length === 0 ? (

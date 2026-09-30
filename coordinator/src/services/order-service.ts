@@ -129,8 +129,8 @@ export class OrderService {
     return this.repo.findByPublicId(publicId);
   }
 
-  history(address: string, limit?: number, offset?: number): Promise<OrderRow[]> {
-    return this.repo.findByAddress(address, limit, offset);
+  history(address: string, limit?: number, offset?: number, createdAtGreaterThan?: number, createdAtLessThan?: number): Promise<OrderRow[]> {
+    return this.repo.findByAddress(address, limit, offset, createdAtGreaterThan, createdAtLessThan);
   }
 
   findByHashlock(hashlock: string): Promise<OrderRow | null> {
