@@ -53,6 +53,11 @@ jobs:
       - name: Install Foundry
         uses: foundry-rs/foundry-toolchain@v1
 
+      # Slither auto-detects the Foundry project (contracts/foundry.toml) and
+      # shells out to `forge config` / `forge build`, so forge must be on PATH.
+      - name: Install Foundry
+        uses: foundry-rs/foundry-toolchain@v1
+
       - name: Setup pnpm
         uses: pnpm/action-setup@v4
         with:

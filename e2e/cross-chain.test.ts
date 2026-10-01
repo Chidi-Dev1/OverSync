@@ -124,6 +124,138 @@ describe("cross-chain HTLC differential harness", () => {
     });
   });
 
+  // ── Two-sided escrow release invariant (issue #281) ───────────────────────
+  //
+  // A cross-chain swap is only safe when BOTH legs finalise together. These
+  // tests track the escrow balance on the EVM fixture and the Stellar (Soroban)
+  // fixture and compare them at the end of claim and refund, so a single-sided
+  // fill — a stuck bridge — fails loudly instead of being reported as success.
+  describe("two-sided escrow release", () => {
+    const AMOUNT = DEFAULT_ESCROW_AMOUNT;
+
+    function fundedPair(secret: ReturnType<typeof generateSecret>) {
+      const evm = new EvmHtlcSim();
+      const stellar = new SorobanHtlcSim();
+      const evmId = evm.createOrder({
+        hashlock: secret.sha256,
+        timelockSeconds: TIMELOCK_SECONDS,
+        amount: AMOUNT,
+        maker: "evm-maker",
+        recipient: "evm-recipient"
+      });
+      const stellarId = stellar.createOrder({
+        hashlock: secret.sha256,
+        timelockSeconds: TIMELOCK_SECONDS,
+        amount: AMOUNT,
+        maker: "stellar-maker",
+        recipient: "stellar-recipient"
+      });
+      const legs: [CrossChainLeg, CrossChainLeg] = [
+        { side: "evm", sim: evm, orderId: evmId },
+        { side: "stellar", sim: stellar, orderId: stellarId }
+      ];
+      return { evm, stellar, evmId, stellarId, legs };
+    }
+
+    it("locks escrow on both sides when the pair is funded", () => {
+      const { evm, stellar, evmId, stellarId } = fundedPair(generateSecret());
+      expect(evm.getEscrowBalanceFor(evmId)).toBe(AMOUNT);
+      expect(stellar.getEscrowBalanceFor(stellarId)).toBe(AMOUNT);
+    });
+
+    it("happy-path claim releases escrow on BOTH sides to the recipient", () => {
+      const secret = generateSecret();
+      const { evm, stellar, evmId, stellarId, legs } = fundedPair(secret);
+
+      const evmRecipientBefore = evm.getBalance("evm-recipient");
+      const stellarRecipientBefore = stellar.getBalance("stellar-recipient");
+
+      evm.claimOrder(evmId, secret.preimage);
+      stellar.claimOrder(stellarId, secret.preimage);
+
+      // Core invariant: both escrow balances compared at the end of the claim.
+      expect(() => assertEscrowReleasedTogether(legs, "claim")).not.toThrow();
+
+      // Funds released to the expected recipient on each side.
+      expect(evm.getBalance("evm-recipient") - evmRecipientBefore).toBe(AMOUNT);
+      expect(stellar.getBalance("stellar-recipient") - stellarRecipientBefore).toBe(AMOUNT);
+      expect(evm.getEscrowBalanceFor(evmId)).toBe(0n);
+      expect(stellar.getEscrowBalanceFor(stellarId)).toBe(0n);
+    });
+
+    it("happy-path refund returns escrow on BOTH sides to the maker", () => {
+      const secret = generateSecret();
+      const { evm, stellar, evmId, stellarId, legs } = fundedPair(secret);
+
+      const evmMakerBefore = evm.getBalance("evm-maker");
+      const stellarMakerBefore = stellar.getBalance("stellar-maker");
+
+      evm.advanceTime(PAST_TIMELOCK);
+      stellar.advanceTime(PAST_TIMELOCK);
+      evm.refundOrder(evmId);
+      stellar.refundOrder(stellarId);
+
+      expect(() => assertEscrowReleasedTogether(legs, "refund")).not.toThrow();
+
+      // Funds back with the maker on each side.
+      expect(evm.getBalance("evm-maker") - evmMakerBefore).toBe(AMOUNT);
+      expect(stellar.getBalance("stellar-maker") - stellarMakerBefore).toBe(AMOUNT);
+      expect(evm.getEscrowBalanceFor(evmId)).toBe(0n);
+      expect(stellar.getEscrowBalanceFor(stellarId)).toBe(0n);
+    });
+
+    it("a claim that releases only the EVM side FAILS and names Stellar as still locked", () => {
+      const secret = generateSecret();
+      const { evm, stellar, evmId, stellarId, legs } = fundedPair(secret);
+
+      evm.claimOrder(evmId, secret.preimage); // single-sided fill
+
+      let thrown: unknown;
+      try {
+        assertEscrowReleasedTogether(legs, "claim");
+      } catch (e) {
+        thrown = e;
+      }
+      expect(thrown).toBeInstanceOf(OneSidedReleaseError);
+      expect((thrown as OneSidedReleaseError).lockedSide).toBe("stellar");
+      // The stuck side still holds the escrow.
+      expect(stellar.getEscrowBalanceFor(stellarId)).toBe(AMOUNT);
+      expect(stellar.getOrder(stellarId).status).toBe("Funded");
+    });
+
+    it("a refund that releases only the Stellar side FAILS and names EVM as still locked", () => {
+      const secret = generateSecret();
+      const { evm, stellar, evmId, stellarId, legs } = fundedPair(secret);
+
+      evm.advanceTime(PAST_TIMELOCK);
+      stellar.advanceTime(PAST_TIMELOCK);
+      stellar.refundOrder(stellarId); // single-sided refund
+
+      let thrown: unknown;
+      try {
+        assertEscrowReleasedTogether(legs, "refund");
+      } catch (e) {
+        thrown = e;
+      }
+      expect(thrown).toBeInstanceOf(OneSidedReleaseError);
+      expect((thrown as OneSidedReleaseError).lockedSide).toBe("evm");
+      expect(evm.getEscrowBalanceFor(evmId)).toBe(AMOUNT);
+      expect(evm.getOrder(evmId).status).toBe("Funded");
+    });
+
+    it("uses only canonical Hardhat test keys — never a mainnet key", () => {
+      // The two-sided simulation above holds no key material at all; the real
+      // EVM fixture uses the publicly documented Hardhat/Anvil dev accounts,
+      // which control no real funds.
+      expect(HARDHAT_TEST_KEYS.deployer).toBe(
+        "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80"
+      );
+      expect(HARDHAT_TEST_KEYS.beneficiary).toBe(
+        "0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d"
+      );
+    });
+  });
+
   // ── Real EVM execution via Anvil + deployed HTLCEscrow ──────────────────
 describe("real EVM HTLCEscrow (Anvil)", () => {
     let fixture: RealEvmHtlcFixture;
@@ -142,8 +274,14 @@ describe("real EVM HTLCEscrow (Anvil)", () => {
       await fixture.createOrder(hashOrderPreimage(orderId, secret.preimage), TIMELOCK_SECONDS);
       expect(await fixture.getOrderStatus(orderId)).toBe("Funded");
 
+      // The real EVM fixture tracks escrow: funding locks ESCROW_AMOUNT in the contract.
+      const escrowWhileFunded = await fixture.getEscrowBalance();
+
       await fixture.claimOrder(orderId, secret.preimage);
       expect(await fixture.getOrderStatus(orderId)).toBe("Claimed");
+
+      // Claiming released the escrow out of the contract to the beneficiary.
+      expect(escrowWhileFunded - (await fixture.getEscrowBalance())).toBe(ESCROW_AMOUNT);
 
       expect(verifyPreimage(secret.preimage, secret.sha256)).toBe("sha256");
     }, 30_000);
