@@ -421,9 +421,9 @@ export default function TransactionHistory({ ethAddress, stellarAddress }: Trans
                         <ExternalLink className="h-3 w-3 opacity-70" />
                       </a>
                       <CopyableIdentifier
-                        value={getEtherscanUrl(tx.ethTxHash)}
+                        value={tx.ethTxHash}
                         hideDisplay
-                        copyLabel="Etherscan URL"
+                        copyLabel="transaction hash"
                       />
                     </div>
                   )}
@@ -441,9 +441,9 @@ export default function TransactionHistory({ ethAddress, stellarAddress }: Trans
                         <ExternalLink className="h-3.5 w-3.5 opacity-70" />
                       </a>
                       <CopyableIdentifier
-                        value={getStellarExplorerUrl(tx.stellarTxHash)}
+                        value={tx.stellarTxHash}
                         hideDisplay
-                        copyLabel="Stellar Expert URL"
+                        copyLabel="transaction hash"
                       />
                     </div>
                   )}
@@ -527,9 +527,9 @@ export default function TransactionHistory({ ethAddress, stellarAddress }: Trans
                         <span>{getRefundNetworkLabel(tx)}</span>
                       </a>
                       <CopyableIdentifier
-                        value={getRefundExplorerUrl(tx)}
+                        value={tx.refundTxHash}
                         hideDisplay
-                        copyLabel="refund URL"
+                        copyLabel="transaction hash"
                       />
                     </div>
                   )}
