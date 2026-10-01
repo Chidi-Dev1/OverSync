@@ -55,6 +55,10 @@ vi.mock('./components/TransactionHistory', () => ({
   default: () => null,
 }));
 
+vi.mock('./components/DeploymentSelfCheck', () => ({
+  default: () => null,
+}));
+
 describe('App — Mainnet safety gates', () => {
   beforeEach(() => {
     vi.clearAllMocks();
