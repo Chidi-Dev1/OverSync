@@ -2,13 +2,8 @@ import { Router } from "express";
 import { z } from "zod";
 import type { OrderRow, OrderSnapshot } from "../../persistence/orders-repo.js";
 import { announceSchema, OrderService, OrderValidationError } from "../../services/order-service.js";
-import {
-  cursorSchema,
-  encodeCursor,
-  decodeCursor,
-  validateCursor,
-  type Cursor,
-} from "./cursor-utils.js";
+import { encodeCursor, decodeCursor } from "./cursor-utils.js";
+import { evaluateRefundEligibility } from "../../utils/timelock-validator.js";
 
 function orderValidationResponse(err: OrderValidationError): { status: number; body: Record<string, unknown> } {
   if (err.code === "quote_expired" || err.code === "quote_not_found" || err.code === "quote_mismatch") {
@@ -158,6 +153,24 @@ export function ordersRoutes(orders: OrderService): Router {
       }
       const transitions = await orders.getTransitions(id);
       res.json({ transitions });
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  router.get("/orders/:id/refund-eligibility", async (req, res, next) => {
+    try {
+      const order = await orders.get(req.params.id);
+      if (!order) {
+        res.status(404).json({ error: "not_found" });
+        return;
+      }
+
+      const timelocks = {
+        ethereum: order.srcChain === "ethereum" ? order.srcTimelock : order.dstTimelock,
+        stellar: order.srcChain === "stellar" ? order.srcTimelock : order.dstTimelock
+      };
+      res.json(evaluateRefundEligibility(timelocks, Math.floor(Date.now() / 1000)));
     } catch (err) {
       next(err);
     }

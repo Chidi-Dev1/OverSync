@@ -207,3 +207,91 @@ describe("GET /api/orders/:id/transitions", () => {
     expect(res.body.transitions[2]).toMatchObject({ from: "src_locked", to: "refunded", category: "refunded" });
   });
 });
+
+describe("GET /api/orders/:id/refund-eligibility", () => {
+  it("identifies the chain that is still locked and its earliest refund time", async () => {
+    const db = await freshDb();
+    const orders = buildOrderService(db);
+    const app = buildApp(orders);
+    const order = await orders.announce({
+      direction: "eth_to_xlm",
+      hashlock: "0x" + "e".repeat(64),
+      srcChain: "ethereum",
+      srcAddress: VALID_ETH_ADDR,
+      srcAsset: "native",
+      srcAmount: "1",
+      srcSafetyDeposit: "1",
+      dstChain: "stellar",
+      dstAddress: VALID_STELLAR_ADDR,
+      dstAsset: "native",
+      dstAmount: "1"
+    });
+    const now = Math.floor(Date.now() / 1000);
+    const ethereumRefundAt = now + 3600;
+    await orders.recordSrcLock({
+      publicId: order.publicId,
+      orderId: "eth-lock",
+      txHash: "0xethlock",
+      blockNumber: 1,
+      timelock: ethereumRefundAt
+    });
+    await orders.recordDstLock({
+      publicId: order.publicId,
+      orderId: "stellar-lock",
+      txHash: "0xstellarlock",
+      blockNumber: 2,
+      timelock: now - 3600,
+      resolver: null
+    });
+
+    const response = await request(app)
+      .get(`/api/orders/${order.publicId}/refund-eligibility`)
+      .expect(200);
+
+    expect(response.body).toEqual({
+      eligible: false,
+      lockedSides: [{ chain: "ethereum", earliestRefundAt: ethereumRefundAt + 1 }]
+    });
+  });
+
+  it("allows refund eligibility only after both chain timelocks expire", async () => {
+    const db = await freshDb();
+    const orders = buildOrderService(db);
+    const app = buildApp(orders);
+    const order = await orders.announce({
+      direction: "xlm_to_eth",
+      hashlock: "0x" + "f".repeat(64),
+      srcChain: "stellar",
+      srcAddress: VALID_STELLAR_ADDR,
+      srcAsset: "native",
+      srcAmount: "1",
+      srcSafetyDeposit: "1",
+      dstChain: "ethereum",
+      dstAddress: VALID_ETH_ADDR,
+      dstAsset: "native",
+      dstAmount: "1"
+    });
+    const now = Math.floor(Date.now() / 1000);
+    await orders.recordSrcLock({
+      publicId: order.publicId,
+      orderId: "stellar-lock-2",
+      txHash: "0xstellarlock2",
+      blockNumber: 3,
+      timelock: now - 3600
+    });
+    await orders.recordDstLock({
+      publicId: order.publicId,
+      orderId: "eth-lock-2",
+      txHash: "0xethlock2",
+      blockNumber: 4,
+      timelock: now - 7200,
+      resolver: null
+    });
+
+    const response = await request(app)
+      .get(`/api/orders/${order.publicId}/refund-eligibility`)
+      .expect(200);
+
+    expect(response.body).toEqual({ eligible: true, lockedSides: [] });
+  });
+});
