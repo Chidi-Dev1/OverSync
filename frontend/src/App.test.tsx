@@ -9,7 +9,7 @@ vi.mock('./config/networks', () => ({
   resolveNetworkMode: vi.fn((requested: string) => requested),
   getCurrentNetwork: vi.fn(() => ({
     ethereum: { explorerUrl: 'https://sepolia.etherscan.io' },
-    stellar: { explorerUrl: 'https://stellar.expert/explorer/testnet' },
+    stellar: { explorerUrl: 'https://testnet.stellarchain.io' },
   })),
   getContractAddresses: vi.fn(() => ({
     ethereum: {

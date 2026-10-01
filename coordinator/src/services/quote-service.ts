@@ -29,70 +29,14 @@ export interface PriceQuote {
   issuedAt: number;
   /** Unix ms after which this quote must not be used to fill an order. */
   expiresAt: number;
-  /**
-   * Source amount this quote was issued for, as a base-unit integer
-   * string (e.g. wei). When set, an order must announce exactly this
-   * `srcAmount` or it is rejected.
-   */
-  amountBaseUnits?: string;
-}
-
-export class AmountParseError extends Error {
-  constructor(message: string) {
-    super(message);
-    this.name = "AmountParseError";
-  }
-}
-
-export class QuoteAmountMismatchError extends Error {
-  constructor(
-    public readonly quoteId: string,
-    public readonly quotedAmount: string,
-    public readonly orderAmount: string
-  ) {
-    super(`Quote ${quoteId} was issued for ${quotedAmount} base units, order announced ${orderAmount}`);
-    this.name = "QuoteAmountMismatchError";
-  }
-}
-
-const BASE_UNIT_INTEGER = /^(0|[1-9]\d*)$/;
-const DECIMAL_AMOUNT = /^(\d+)(?:\.(\d*))?$|^\.(\d+)$/;
-
-/**
- * Parse a user-entered decimal amount into token base units using only
- * string/BigInt arithmetic (no floating point). This is the same
- * algorithm as `parseAmountToBaseUnits` in
- * `frontend/src/lib/sanitizeAmountInput.ts`, so the form and the
- * coordinator always agree on the integer.
- *
- * Rejects empty input, signs, exponents, and more fractional digits than
- * the asset's `decimals` allows (never rounds or truncates).
- */
-export function parseAmountToBaseUnits(input: string, decimals: number): bigint {
-  if (!Number.isInteger(decimals) || decimals < 0) {
-    throw new AmountParseError(`invalid decimals: ${decimals}`);
-  }
-  const text = input.trim();
-  const m = DECIMAL_AMOUNT.exec(text);
-  if (!m) {
-    throw new AmountParseError(`amount must be a non-negative decimal: "${input}"`);
-  }
-  const whole = m[1] ?? "0";
-  const frac = m[2] ?? m[3] ?? "";
-  if (frac.length > decimals) {
-    throw new AmountParseError(
-      `amount has ${frac.length} fractional digits, asset allows ${decimals}`
-    );
-  }
-  return BigInt(whole) * 10n ** BigInt(decimals) + BigInt(frac.padEnd(decimals, "0") || "0");
-}
-
-/** Validate a base-unit integer string (as sent by the form) and return it canonicalised. */
-export function parseBaseUnitInteger(value: string): string {
-  if (!BASE_UNIT_INTEGER.test(value)) {
-    throw new AmountParseError(`amount must be a base-unit integer string: "${value}"`);
-  }
-  return BigInt(value).toString();
+  /** Order terms accepted with this quote, when it has been used to announce an order. */
+  terms?: {
+    fromAsset: string;
+    toAsset: string;
+    amount: string;
+    fromNetwork: string;
+    toNetwork: string;
+  };
 }
 
 export class QuoteExpiredError extends Error {
@@ -190,6 +134,15 @@ export class QuoteService {
    */
   getById(quoteId: string): PriceQuote | null {
     return this.quotes.get(quoteId) ?? null;
+  }
+
+  bindOrderTerms(
+    quoteId: string,
+    terms: NonNullable<PriceQuote["terms"]>
+  ): PriceQuote {
+    const quote = this.assertFresh(quoteId);
+    quote.terms = terms;
+    return quote;
   }
 
   /**

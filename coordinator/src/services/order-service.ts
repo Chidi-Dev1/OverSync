@@ -22,8 +22,49 @@ export class OrderService {
       throw new Error("Legacy bridge lock rejected: v2 escrow active");
     }
 
-    // Proceed with v2 escrow order building
-    return this.buildV2EscrowOrder(request);
+    const hashlock = input.hashlock.toLowerCase() as `0x${string}`;
+
+    // --- Quote freshness gate -------------------------------------------
+    if (input.quoteId) {
+      if (!this.quoteService) {
+        // No QuoteService wired in (e.g. test mode without quotes) — skip.
+        this.log.debug({ quoteId: input.quoteId }, "quoteId supplied but no QuoteService wired; skipping freshness check");
+      } else {
+        try {
+          this.quoteService.bindOrderTerms(input.quoteId, {
+            fromAsset: input.srcAsset,
+            toAsset: input.dstAsset,
+            amount: input.srcAmount,
+            fromNetwork: input.srcChain,
+            toNetwork: input.dstChain
+          });
+          this.log.debug({ quoteId: input.quoteId }, "quote freshness confirmed");
+        } catch (err) {
+          if (err instanceof QuoteExpiredError || err instanceof QuoteNotFoundError) {
+            throw new OrderValidationError(err.message);
+          }
+          throw err;
+        }
+      }
+    }
+    // -------------------------------------------------------------------
+
+    const existing = await this.repo.findByHashlock(hashlock);
+    if (existing) {
+      throw new OrderValidationError(
+        `An order with hashlock ${hashlock} already exists (publicId=${existing.publicId})`
+      );
+    }
+
+    // Strip quoteId — it's not a persisted column, just a freshness gate.
+    const { quoteId: _q, ...repoInput } = input;
+    const order = await this.repo.announce({ ...repoInput, hashlock } as AnnounceOrderInput);
+    this.log.info(
+      { publicId: order.publicId, direction: order.direction, quoteId: input.quoteId ?? null },
+      "order announced"
+    );
+    ordersTotal.inc({ status: "announced" });
+    return order;
   }
 
   private async buildV2EscrowOrder(request: LockRequest): Promise<any> {
