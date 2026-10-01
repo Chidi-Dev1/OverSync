@@ -16,7 +16,8 @@ import {
   QuoteService,
   QuoteExpiredError,
   QuoteNotFoundError,
-  QuoteAmountMismatchError
+  QuoteTermsMismatchError,
+  type QuoteTerms
 } from "./quote-service.js";
 import { loadConfig } from "../config.js";
 import {
@@ -54,11 +55,12 @@ export const announceSchema = z.object({
 });
 
 export type AnnounceInput = z.infer<typeof announceSchema>;
+type OrderValidationCode = TimelockValidationError | "quote_expired" | "quote_not_found" | "quote_mismatch";
 
 export class OrderValidationError extends Error {
-  readonly code?: TimelockValidationError;
+  readonly code?: OrderValidationCode;
 
-  constructor(message: string, code?: TimelockValidationError) {
+  constructor(message: string, code?: OrderValidationCode) {
     super(message);
     this.name = "OrderValidationError";
     this.code = code;
@@ -153,15 +155,25 @@ export class OrderService {
         this.log.debug({ quoteId: input.quoteId }, "quoteId supplied but no QuoteService wired; skipping freshness check");
       } else {
         try {
-          this.quoteService.assertFresh(input.quoteId, input.srcAmount);
+          const quoteTerms: QuoteTerms = {
+            srcChain: input.srcChain,
+            srcAsset: input.srcAsset,
+            srcAmount: input.srcAmount,
+            dstChain: input.dstChain,
+            dstAsset: input.dstAsset,
+            dstAmount: input.dstAmount
+          };
+          this.quoteService.assertMatches(input.quoteId, quoteTerms);
           this.log.debug({ quoteId: input.quoteId }, "quote freshness confirmed");
         } catch (err) {
-          if (
-            err instanceof QuoteExpiredError ||
-            err instanceof QuoteNotFoundError ||
-            err instanceof QuoteAmountMismatchError
-          ) {
-            throw new OrderValidationError(err.message);
+          if (err instanceof QuoteExpiredError) {
+            throw new OrderValidationError(err.message, "quote_expired");
+          }
+          if (err instanceof QuoteNotFoundError) {
+            throw new OrderValidationError(err.message, "quote_not_found");
+          }
+          if (err instanceof QuoteTermsMismatchError) {
+            throw new OrderValidationError(err.message, "quote_mismatch");
           }
           throw err;
         }

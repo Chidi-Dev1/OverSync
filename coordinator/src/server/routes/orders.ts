@@ -11,6 +11,9 @@ import {
 } from "./cursor-utils.js";
 
 function orderValidationResponse(err: OrderValidationError): { status: number; body: Record<string, unknown> } {
+  if (err.code === "quote_expired" || err.code === "quote_not_found" || err.code === "quote_mismatch") {
+    return { status: 400, body: { error: err.code, message: err.message } };
+  }
   if (err.code === "TIMELOCKS_REVERSED" || err.code === "GAP_TOO_SMALL") {
     return { status: 400, body: { error: "timelock_ordering_invalid", code: err.code } };
   }
