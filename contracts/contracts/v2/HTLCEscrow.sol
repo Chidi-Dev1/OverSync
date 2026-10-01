@@ -31,13 +31,10 @@ import {IResolverRegistry} from "./interfaces/IResolverRegistry.sol";
 ///            ability of users to claim or refund: those paths are
 ///            always permissionless.
 ///
-/// @dev The contract verifies preimages using BOTH sha256 (interop with
-///      Stellar/Soroban which uses sha256) and keccak256 (matching
-///      classic Ethereum HTLC convention). Callers commit to a single
-///      `hashlock` and the preimage is accepted iff *either* digest
-///      matches it. This lets a single Soroban / Ethereum cross-chain
-///      swap use one hashlock end-to-end while keeping the contract
-///      compatible with EVM tooling that expects keccak.
+/// @dev Cross-chain hashlocks use sha256(abi.encodePacked(orderId,
+///      preimage)); the order id is uint256-encoded as 32-byte big-endian.
+///      This matches the Soroban implementation and prevents a preimage
+///      from being replayed against a different order.
 contract HTLCEscrow is IHTLCEscrow, ReentrancyGuard {
     using SafeERC20 for IERC20;
 
@@ -186,20 +183,12 @@ contract HTLCEscrow is IHTLCEscrow, ReentrancyGuard {
         if (order.status != OrderStatus.Funded) revert OrderNotClaimable();
         if (block.timestamp > order.timelock) revert Expired();
 
-        // A claim must be submitted by a resolver that is still active on the
-        // registry bound at deployment time. If the factory failed to wire the
-        // registry, or a manual escrow skipped that wiring, this reverts instead
-        // of trusting a mismatched registry state.
-        if (address(resolverRegistry) == address(0) || !resolverRegistry.isActive(msg.sender)) {
-            revert ResolverNotAuthorised();
-        }
+        if (preimage.length == 0) revert InvalidPreimage();
 
-        // Verify hashlock. We accept both sha256 and keccak256 digests
-        // so that a Soroban-side counterpart (sha256) and a classic EVM
-        // counterparty (keccak256) can share the same on-chain hashlock.
-        bytes32 sha = sha256(preimage);
+        // Hashlock v1: SHA256(uint256 orderId, big-endian || preimage bytes).
+        bytes32 sha = sha256(abi.encodePacked(orderId, preimage));
         bytes32 kek = keccak256(preimage);
-        if (sha != order.hashlock && kek != order.hashlock) revert InvalidPreimage();
+        if (sha != order.hashlock) revert InvalidPreimage();
 
         order.status = OrderStatus.Claimed;
         order.finalisedAt = uint64(block.timestamp);
@@ -267,8 +256,8 @@ contract HTLCEscrow is IHTLCEscrow, ReentrancyGuard {
     // Internals
     // ---------------------------------------------------------------
 
-    /// @dev Suppress low-level-calls and arbitrary-send-eth: Safe because _payout only transfers native ETH to the validated beneficiary or refundAddress stored in the order structure. Slither anchors both findings to the function signature, so the single comma-separated suppression must be the line immediately above it.
-    // slither-disable-next-line low-level-calls,arbitrary-send-eth
+    /// @dev Suppress arbitrary-send-eth and low-level-calls: Safe because _payout only transfers native ETH to the validated beneficiary or refundAddress stored in the order structure.
+    // slither-disable-next-line arbitrary-send-eth,low-level-calls
     function _payout(address token, address to, uint256 amount) private {
         if (token == address(0)) {
             // Native ETH transfer.

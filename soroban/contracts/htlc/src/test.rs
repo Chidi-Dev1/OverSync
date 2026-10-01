@@ -18,8 +18,27 @@ fn deploy_token<'a>(env: &Env, admin: &Address) -> (Address, StellarAssetClient<
     )
 }
 
-fn sha256_32(env: &Env, bytes: &Bytes) -> BytesN<32> {
-    BytesN::<32>::from(env.crypto().sha256(bytes))
+fn hashlock_for_order(env: &Env, order_id: u64, preimage: &Bytes) -> BytesN<32> {
+    let mut encoded_order_id = [0u8; 32];
+    encoded_order_id[24..].copy_from_slice(&order_id.to_be_bytes());
+    let mut input = Bytes::from_array(env, &encoded_order_id);
+    input.append(preimage);
+    BytesN::<32>::from(env.crypto().sha256(&input))
+}
+
+fn hashlock_order_one(env: &Env, preimage: &Bytes) -> BytesN<32> {
+    hashlock_for_order(env, 1, preimage)
+}
+
+fn decode_hex32(value: &str) -> [u8; 32] {
+    let digits = value.strip_prefix("0x").unwrap().as_bytes();
+    assert_eq!(digits.len(), 64);
+    let mut decoded = [0u8; 32];
+    for (index, byte) in decoded.iter_mut().enumerate() {
+        let pair = core::str::from_utf8(&digits[index * 2..index * 2 + 2]).unwrap();
+        *byte = u8::from_str_radix(pair, 16).unwrap();
+    }
+    decoded
 }
 
 fn setup(env: &Env, min_safety_deposit: i128) -> (Address, HtlcContractClient<'_>) {
@@ -78,7 +97,7 @@ fn happy_path_create_and_claim() {
     sac.mint(&sender, &1_000_0000000); // 1000 XLM in stroops
 
     let preimage = Bytes::from_array(&env, &[7u8; 32]);
-    let hashlock = sha256_32(&env, &preimage);
+    let hashlock = hashlock_order_one(&env, &preimage);
 
     let amount = 500_0000000i128; // 500 XLM
     let safety = 10_000_000i128; //   1 XLM
@@ -111,6 +130,45 @@ fn happy_path_create_and_claim() {
 }
 
 #[test]
+fn shared_hashlock_vector_is_accepted() {
+    let vector = include_str!("../../../../e2e/fixtures/hashlock-v1.tsv")
+        .lines()
+        .find(|line| !line.starts_with('#'))
+        .unwrap();
+    let mut fields = vector.split('\t');
+    let expected_order_id: u64 = fields.next().unwrap().parse().unwrap();
+    let preimage_bytes = decode_hex32(fields.next().unwrap());
+    let expected_hashlock = decode_hex32(fields.next().unwrap());
+
+    let env = Env::default();
+    env.mock_all_auths();
+    let asset_admin = Address::generate(&env);
+    let (asset, sac, _token) = deploy_token(&env, &asset_admin);
+    let (_admin, htlc) = setup(&env, 0);
+    let sender = Address::generate(&env);
+    let beneficiary = Address::generate(&env);
+    let preimage = Bytes::from_array(&env, &preimage_bytes);
+    let hashlock = hashlock_for_order(&env, expected_order_id, &preimage);
+
+    assert_eq!(hashlock, BytesN::from_array(&env, &expected_hashlock));
+    sac.mint(&sender, &100_0000000);
+    let order_id = htlc.create_order(
+        &sender,
+        &beneficiary,
+        &sender,
+        &asset,
+        &10_0000000i128,
+        &0i128,
+        &hashlock,
+        &600u64,
+    );
+    assert_eq!(order_id, expected_order_id);
+    htlc.claim_order(&order_id, &preimage, &beneficiary);
+    let order: Order = htlc.get_order(&order_id).unwrap();
+    assert_eq!(order.status, OrderStatus::Claimed);
+}
+
+#[test]
 fn refund_after_timeout_pays_refund_address() {
     let env = Env::default();
     env.mock_all_auths();
@@ -126,7 +184,7 @@ fn refund_after_timeout_pays_refund_address() {
     sac.mint(&sender, &100_0000000);
 
     let preimage = Bytes::from_array(&env, &[1u8; 32]);
-    let hashlock = sha256_32(&env, &preimage);
+    let hashlock = hashlock_order_one(&env, &preimage);
 
     let amount = 50_0000000i128;
     let safety = 1_000_000i128;
@@ -168,7 +226,7 @@ fn claim_with_wrong_preimage_fails() {
     sac.mint(&sender, &100_0000000);
 
     let real_preimage = Bytes::from_array(&env, &[9u8; 32]);
-    let hashlock = sha256_32(&env, &real_preimage);
+    let hashlock = hashlock_order_one(&env, &real_preimage);
     let order_id = htlc.create_order(
         &sender,
         &beneficiary,
@@ -186,6 +244,64 @@ fn claim_with_wrong_preimage_fails() {
 }
 
 #[test]
+fn claim_with_empty_preimage_fails() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let asset_admin = Address::generate(&env);
+    let (asset, sac, _token) = deploy_token(&env, &asset_admin);
+    let (_admin, htlc) = setup(&env, 0);
+    let sender = Address::generate(&env);
+    let beneficiary = Address::generate(&env);
+    sac.mint(&sender, &100_0000000);
+
+    let preimage = Bytes::from_array(&env, &[9u8; 32]);
+    let hashlock = hashlock_order_one(&env, &preimage);
+    let order_id = htlc.create_order(
+        &sender,
+        &beneficiary,
+        &sender,
+        &asset,
+        &10_0000000i128,
+        &0i128,
+        &hashlock,
+        &600u64,
+    );
+
+    let result = htlc.try_claim_order(&order_id, &Bytes::new(&env), &beneficiary);
+    assert_eq!(result.err().unwrap().unwrap(), Error::InvalidPreimage.into());
+}
+
+#[test]
+fn preimage_from_another_order_fails() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let asset_admin = Address::generate(&env);
+    let (asset, sac, _token) = deploy_token(&env, &asset_admin);
+    let (_admin, htlc) = setup(&env, 0);
+    let sender = Address::generate(&env);
+    let beneficiary = Address::generate(&env);
+    sac.mint(&sender, &100_0000000);
+
+    let first_preimage = Bytes::from_array(&env, &[1u8; 32]);
+    let second_preimage = Bytes::from_array(&env, &[2u8; 32]);
+    let first_hashlock = hashlock_for_order(&env, 1, &first_preimage);
+    let second_hashlock = hashlock_for_order(&env, 2, &second_preimage);
+    let first_id = htlc.create_order(
+        &sender, &beneficiary, &sender, &asset, &10_0000000i128, &0i128,
+        &first_hashlock, &600u64,
+    );
+    let second_id = htlc.create_order(
+        &sender, &beneficiary, &sender, &asset, &10_0000000i128, &0i128,
+        &second_hashlock, &600u64,
+    );
+
+    assert_eq!(first_id, 1);
+    assert_eq!(second_id, 2);
+    let result = htlc.try_claim_order(&second_id, &first_preimage, &beneficiary);
+    assert_eq!(result.err().unwrap().unwrap(), Error::InvalidPreimage.into());
+}
+
+#[test]
 fn claim_after_expiry_fails() {
     let env = Env::default();
     env.mock_all_auths();
@@ -198,7 +314,7 @@ fn claim_after_expiry_fails() {
     sac.mint(&sender, &100_0000000);
 
     let preimage = Bytes::from_array(&env, &[2u8; 32]);
-    let hashlock = sha256_32(&env, &preimage);
+    let hashlock = hashlock_order_one(&env, &preimage);
     let order_id = htlc.create_order(
         &sender,
         &beneficiary,
@@ -228,7 +344,7 @@ fn double_claim_fails() {
     sac.mint(&sender, &100_0000000);
 
     let preimage = Bytes::from_array(&env, &[3u8; 32]);
-    let hashlock = sha256_32(&env, &preimage);
+    let hashlock = hashlock_order_one(&env, &preimage);
     let order_id = htlc.create_order(
         &sender,
         &beneficiary,
@@ -258,7 +374,7 @@ fn refund_after_claim_fails() {
     sac.mint(&sender, &100_0000000);
 
     let preimage = Bytes::from_array(&env, &[4u8; 32]);
-    let hashlock = sha256_32(&env, &preimage);
+    let hashlock = hashlock_order_one(&env, &preimage);
     let order_id = htlc.create_order(
         &sender,
         &beneficiary,
@@ -289,7 +405,7 @@ fn timelock_outside_bounds_rejected() {
     sac.mint(&sender, &100_0000000);
 
     let preimage = Bytes::from_array(&env, &[5u8; 32]);
-    let hashlock = sha256_32(&env, &preimage);
+    let hashlock = hashlock_order_one(&env, &preimage);
 
     let too_short = htlc.try_create_order(
         &sender,
@@ -329,7 +445,7 @@ fn safety_deposit_minimum_enforced() {
     sac.mint(&sender, &100_0000000);
 
     let preimage = Bytes::from_array(&env, &[6u8; 32]);
-    let hashlock = sha256_32(&env, &preimage);
+    let hashlock = hashlock_order_one(&env, &preimage);
 
     let res = htlc.try_create_order(
         &sender,
@@ -404,7 +520,7 @@ fn create_order_succeeds_for_active_registered_resolver() {
     assert!(registry.is_active(&resolver));
 
     let preimage = Bytes::from_array(&env, &[42u8; 32]);
-    let hashlock = sha256_32(&env, &preimage);
+    let hashlock = hashlock_order_one(&env, &preimage);
 
     let amount = 100_0000000i128;
     let order_id = htlc.create_order(
@@ -446,7 +562,7 @@ fn create_order_rejects_unregistered_sender_when_registry_is_set() {
     sac.mint(&stranger, &100_0000000);
 
     let preimage = Bytes::from_array(&env, &[11u8; 32]);
-    let hashlock = sha256_32(&env, &preimage);
+    let hashlock = hashlock_order_one(&env, &preimage);
 
     let res = htlc.try_create_order(
         &stranger,
@@ -491,7 +607,7 @@ fn create_order_rejects_resolver_made_inactive_by_slash() {
     assert!(!registry.is_active(&resolver));
 
     let preimage = Bytes::from_array(&env, &[12u8; 32]);
-    let hashlock = sha256_32(&env, &preimage);
+    let hashlock = hashlock_order_one(&env, &preimage);
     let res = htlc.try_create_order(
         &resolver,
         &beneficiary,
@@ -527,7 +643,7 @@ fn clear_resolver_registry_restores_permissionless_create_order() {
     sac.mint(&stranger, &100_0000000);
 
     let preimage = Bytes::from_array(&env, &[13u8; 32]);
-    let hashlock = sha256_32(&env, &preimage);
+    let hashlock = hashlock_order_one(&env, &preimage);
 
     // Blocked while registry is bound.
     let blocked = htlc.try_create_order(
@@ -720,7 +836,7 @@ fn order_ttl_bumped_on_create() {
     sac.mint(&sender, &100_0000000i128);
 
     let preimage = Bytes::from_array(&env, &[20u8; 32]);
-    let hashlock = sha256_32(&env, &preimage);
+    let hashlock = hashlock_order_one(&env, &preimage);
 
     let order_id = htlc.create_order(
         &sender, &beneficiary, &sender, &asset,
@@ -747,7 +863,7 @@ fn order_ttl_bumped_on_claim() {
     sac.mint(&sender, &100_0000000i128);
 
     let preimage = Bytes::from_array(&env, &[21u8; 32]);
-    let hashlock = sha256_32(&env, &preimage);
+    let hashlock = hashlock_order_one(&env, &preimage);
 
     let order_id = htlc.create_order(
         &sender, &beneficiary, &sender, &asset,
@@ -782,7 +898,7 @@ fn order_ttl_bumped_on_refund() {
     sac.mint(&sender, &100_0000000i128);
 
     let preimage = Bytes::from_array(&env, &[22u8; 32]);
-    let hashlock = sha256_32(&env, &preimage);
+    let hashlock = hashlock_order_one(&env, &preimage);
 
     let order_id = htlc.create_order(
         &sender, &beneficiary, &sender, &asset,

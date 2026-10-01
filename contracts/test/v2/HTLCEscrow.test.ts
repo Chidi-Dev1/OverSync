@@ -69,6 +69,10 @@ function randomBytes32() {
   return ethers.hexlify(ethers.randomBytes(32));
 }
 
+function orderHashlock(orderId: bigint, preimage: string) {
+  return ethers.sha256(ethers.solidityPacked(["uint256", "bytes"], [orderId, preimage]));
+}
+
 describe("HTLCEscrow v2", () => {
   describe("createOrder", () => {
     it("locks native ETH with correct hashlock/timelock", async () => {
@@ -76,7 +80,7 @@ describe("HTLCEscrow v2", () => {
       const escrow = await deployEscrow();
 
       const preimage = randomBytes32();
-      const hashlock = ethers.sha256(preimage);
+      const hashlock = orderHashlock(1n, preimage);
 
       const tx = await escrow.connect(sender).createOrder(
         beneficiary.address,
@@ -143,7 +147,7 @@ describe("HTLCEscrow v2", () => {
     it("rejects timelock below MIN_TIMELOCK and above MAX_TIMELOCK", async () => {
       const [sender, beneficiary] = await ethers.getSigners();
       const escrow = await deployEscrow();
-      const hashlock = ethers.sha256(randomBytes32());
+      const hashlock = orderHashlock(1n, randomBytes32());
 
       await expect(
         escrow.connect(sender).createOrder(
@@ -175,7 +179,7 @@ describe("HTLCEscrow v2", () => {
     it("rejects msg.value mismatch for native orders", async () => {
       const [sender, beneficiary] = await ethers.getSigners();
       const escrow = await deployEscrow();
-      const hashlock = ethers.sha256(randomBytes32());
+      const hashlock = orderHashlock(1n, randomBytes32());
 
       await expect(
         escrow.connect(sender).createOrder(
@@ -198,7 +202,7 @@ describe("HTLCEscrow v2", () => {
 
       await token.connect(sender).approve(await escrow.getAddress(), AMOUNT);
       const preimage = randomBytes32();
-      const hashlock = ethers.sha256(preimage);
+      const hashlock = orderHashlock(1n, preimage);
 
       await escrow.connect(sender).createOrder(
         beneficiary.address,
@@ -220,7 +224,7 @@ describe("HTLCEscrow v2", () => {
       const [sender, beneficiary] = await ethers.getSigners();
       const escrow = await deployEscrow();
       const preimage = randomBytes32();
-      const hashlock = ethers.sha256(preimage);
+      const hashlock = orderHashlock(1n, preimage);
 
       await escrow.connect(sender).createOrder(
         beneficiary.address,
@@ -315,23 +319,9 @@ describe("HTLCEscrow v2", () => {
       expect(order.status).to.equal(1); // Claimed
     });
 
-    it("also accepts a keccak256 hashlock (EVM convention)", async () => {
-      const [owner, sender, beneficiary] = await ethers.getSigners();
-      const token = await deployToken();
-      const Registry = await ethers.getContractFactory("ResolverRegistry");
-      const registry = await Registry.deploy(
-        await token.getAddress(),
-        ethers.parseEther("1"),
-        owner.address,
-        owner.address
-      );
-      const escrow = await deployEscrow(await registry.getAddress());
-      await token.transfer(sender.address, ethers.parseEther("1"));
-      await token.connect(sender).approve(await registry.getAddress(), ethers.parseEther("1"));
-      await registerResolver(registry, sender, ethers.parseEther("1"));
-      await token.transfer(beneficiary.address, ethers.parseEther("1"));
-      await token.connect(beneficiary).approve(await registry.getAddress(), ethers.parseEther("1"));
-      await registerResolver(registry, beneficiary, ethers.parseEther("1"));
+    it("rejects a keccak256-only hashlock", async () => {
+      const [sender, beneficiary] = await ethers.getSigners();
+      const escrow = await deployEscrow();
       const preimage = randomBytes32();
       const hashlock = ethers.keccak256(preimage);
 
@@ -346,7 +336,8 @@ describe("HTLCEscrow v2", () => {
         { value: AMOUNT + SAFETY_DEPOSIT }
       );
 
-      await expect(escrow.connect(beneficiary).claimOrder(1, preimage)).to.not.be.reverted;
+      await expect(escrow.connect(beneficiary).claimOrder(1, preimage))
+        .to.be.revertedWithCustomError(escrow, "InvalidPreimage");
     });
 
     it("rejects invalid preimage", async () => {
@@ -367,7 +358,7 @@ describe("HTLCEscrow v2", () => {
       await token.connect(beneficiary).approve(await registry.getAddress(), ethers.parseEther("1"));
       await registerResolver(registry, beneficiary, ethers.parseEther("1"));
       const preimage = randomBytes32();
-      const hashlock = ethers.sha256(preimage);
+      const hashlock = orderHashlock(1n, preimage);
 
       await escrow.connect(sender).createOrder(
         beneficiary.address,
@@ -384,6 +375,83 @@ describe("HTLCEscrow v2", () => {
       await expect(
         escrow.connect(beneficiary).claimOrder(1, wrong)
       ).to.be.revertedWithCustomError(escrow, "InvalidPreimage");
+    });
+
+    it("rejects a one-byte change to the preimage", async () => {
+      const [sender, beneficiary] = await ethers.getSigners();
+      const escrow = await deployEscrow();
+      const preimage = randomBytes32();
+      const changed = ethers.getBytes(preimage);
+      changed[changed.length - 1] ^= 1;
+
+      await escrow.connect(sender).createOrder(
+        beneficiary.address,
+        sender.address,
+        ZERO_ADDR,
+        AMOUNT,
+        SAFETY_DEPOSIT,
+        orderHashlock(1n, preimage),
+        TIMELOCK,
+        { value: AMOUNT + SAFETY_DEPOSIT }
+      );
+
+      await expect(
+        escrow.connect(beneficiary).claimOrder(1, ethers.hexlify(changed))
+      ).to.be.revertedWithCustomError(escrow, "InvalidPreimage");
+    });
+
+    it("rejects an empty preimage", async () => {
+      const [sender, beneficiary] = await ethers.getSigners();
+      const escrow = await deployEscrow();
+      const hashlock = ethers.sha256(ethers.solidityPacked(["uint256", "bytes"], [1n, "0x"]));
+
+      await escrow.connect(sender).createOrder(
+        beneficiary.address,
+        sender.address,
+        ZERO_ADDR,
+        AMOUNT,
+        SAFETY_DEPOSIT,
+        hashlock,
+        TIMELOCK,
+        { value: AMOUNT + SAFETY_DEPOSIT }
+      );
+
+      await expect(
+        escrow.connect(beneficiary).claimOrder(1, "0x")
+      ).to.be.revertedWithCustomError(escrow, "InvalidPreimage");
+    });
+
+    it("rejects a preimage committed to another order", async () => {
+      const [sender, beneficiary] = await ethers.getSigners();
+      const escrow = await deployEscrow();
+      const firstPreimage = randomBytes32();
+      const secondPreimage = randomBytes32();
+
+      await escrow.connect(sender).createOrder(
+        beneficiary.address,
+        sender.address,
+        ZERO_ADDR,
+        AMOUNT,
+        SAFETY_DEPOSIT,
+        orderHashlock(1n, firstPreimage),
+        TIMELOCK,
+        { value: AMOUNT + SAFETY_DEPOSIT }
+      );
+      await escrow.connect(sender).createOrder(
+        beneficiary.address,
+        sender.address,
+        ZERO_ADDR,
+        AMOUNT,
+        SAFETY_DEPOSIT,
+        orderHashlock(2n, secondPreimage),
+        TIMELOCK,
+        { value: AMOUNT + SAFETY_DEPOSIT }
+      );
+
+      await expect(
+        escrow.connect(beneficiary).claimOrder(2, firstPreimage)
+      ).to.be.revertedWithCustomError(escrow, "InvalidPreimage");
+      await expect(escrow.connect(beneficiary).claimOrder(2, secondPreimage)).not.to.be.reverted;
     });
 
     it("rejects claim after expiry", async () => {
@@ -404,7 +472,7 @@ describe("HTLCEscrow v2", () => {
       await token.connect(beneficiary).approve(await registry.getAddress(), ethers.parseEther("1"));
       await registerResolver(registry, beneficiary, ethers.parseEther("1"));
       const preimage = randomBytes32();
-      const hashlock = ethers.sha256(preimage);
+      const hashlock = orderHashlock(1n, preimage);
 
       await escrow.connect(sender).createOrder(
         beneficiary.address,
@@ -442,7 +510,7 @@ describe("HTLCEscrow v2", () => {
       await token.connect(beneficiary).approve(await registry.getAddress(), ethers.parseEther("1"));
       await registerResolver(registry, beneficiary, ethers.parseEther("1"));
       const preimage = randomBytes32();
-      const hashlock = ethers.sha256(preimage);
+      const hashlock = orderHashlock(1n, preimage);
 
       await escrow.connect(sender).createOrder(
         beneficiary.address,
@@ -475,7 +543,7 @@ describe("HTLCEscrow v2", () => {
       const [sender, beneficiary, cleaner] = await ethers.getSigners();
       const escrow = await deployEscrow();
       const preimage = randomBytes32();
-      const hashlock = ethers.sha256(preimage);
+      const hashlock = orderHashlock(1n, preimage);
       const refundAddr = ethers.Wallet.createRandom().address;
 
       await escrow.connect(sender).createOrder(
@@ -530,7 +598,7 @@ describe("HTLCEscrow v2", () => {
       await token.connect(beneficiary).approve(await registry.getAddress(), ethers.parseEther("1"));
       await registerResolver(registry, beneficiary, ethers.parseEther("1"));
       const preimage = randomBytes32();
-      const hashlock = ethers.sha256(preimage);
+      const hashlock = orderHashlock(1n, preimage);
 
       await escrow.connect(sender).createOrder(
         beneficiary.address,
