@@ -21,6 +21,7 @@
  * a top-level config module alongside the rest of the SCF evidence.
  */
 
+import { useCallback, useEffect, useReducer, useRef } from 'react';
 import { Calendar, Check, Clock, ShieldAlert } from 'lucide-react';
 import type { LucideIcon } from 'lucide-react';
 
@@ -264,6 +265,176 @@ export default function AuditGateTimeline({
             </li>
           );
         })}
+      </ol>
+    </section>
+  );
+}
+
+// ─── Order-driven timeline ───────────────────────────────────────────────────
+//
+// The per-order escrow → secret → claim timeline advances ONLY from the
+// coordinator order resource (`GET /api/orders/:id`). A local click records
+// an optimistic intent but never completes a step; the step completes when
+// an order response for the *current* order carries the matching status.
+
+export type OrderTimelineStep = 'escrow' | 'secret' | 'claim';
+
+export const ORDER_TIMELINE_STEPS: readonly { id: OrderTimelineStep; title: string }[] = [
+  { id: 'escrow', title: 'Escrow locked' },
+  { id: 'secret', title: 'Secret revealed' },
+  { id: 'claim', title: 'Claimed' },
+];
+
+type StatusEffect =
+  | { kind: 'none' }
+  | { kind: 'step'; step: OrderTimelineStep }
+  | { kind: 'halted'; label: string };
+
+/**
+ * The single mapping from coordinator order statuses
+ * (coordinator/src/state-machine/order-machine.ts) to timeline steps.
+ * Any status not listed here is treated as unknown and shown as an error.
+ */
+export const COORDINATOR_STATUS_TO_STEP: Readonly<Record<string, StatusEffect>> = {
+  announced: { kind: 'none' },
+  src_locked: { kind: 'step', step: 'escrow' },
+  dst_locked: { kind: 'step', step: 'escrow' },
+  secret_revealed: { kind: 'step', step: 'secret' },
+  completed: { kind: 'step', step: 'claim' },
+  refunded: { kind: 'halted', label: 'Order refunded' },
+  failed: { kind: 'halted', label: 'Order failed' },
+  expired: { kind: 'halted', label: 'Order expired' },
+};
+
+export interface OrderTimelineState {
+  orderId: string | null;
+  completed: OrderTimelineStep[];
+  /** Local clicks awaiting coordinator confirmation. Never rendered as complete. */
+  pending: OrderTimelineStep[];
+  error: string | null;
+}
+
+export type OrderTimelineAction =
+  | { type: 'track'; orderId: string }
+  | { type: 'local'; step: OrderTimelineStep }
+  | { type: 'order'; orderId: string; status: string };
+
+export function initialOrderTimeline(orderId: string | null = null): OrderTimelineState {
+  return { orderId, completed: [], pending: [], error: null };
+}
+
+export function orderTimelineReducer(
+  state: OrderTimelineState,
+  action: OrderTimelineAction
+): OrderTimelineState {
+  switch (action.type) {
+    case 'track':
+      return state.orderId === action.orderId ? state : initialOrderTimeline(action.orderId);
+    case 'local':
+      if (state.pending.includes(action.step) || state.completed.includes(action.step)) return state;
+      return { ...state, pending: [...state.pending, action.step] };
+    case 'order': {
+      // A late response for another (older) order must not move this timeline.
+      if (action.orderId !== state.orderId) return state;
+      const effect = Object.prototype.hasOwnProperty.call(COORDINATOR_STATUS_TO_STEP, action.status)
+        ? COORDINATOR_STATUS_TO_STEP[action.status]
+        : undefined;
+      if (!effect) {
+        // Do not keep presenting the last known success as current.
+        return { ...state, completed: [], pending: [], error: `Unknown coordinator status "${action.status}"` };
+      }
+      if (effect.kind === 'halted') return { ...state, error: effect.label };
+      if (effect.kind === 'none') return { ...state, error: null };
+      return {
+        ...state,
+        error: null,
+        completed: state.completed.includes(effect.step) ? state.completed : [...state.completed, effect.step],
+        pending: state.pending.filter((p) => p !== effect.step),
+      };
+    }
+    default:
+      return state;
+  }
+}
+
+export interface CoordinatorOrderResponse {
+  publicId: string;
+  status: string;
+}
+
+export interface OrderStatusTimelineProps {
+  orderId: string;
+  /** Order API, e.g. `GET ${COORDINATOR}/api/orders/:id`. Injected so tests stub it. */
+  fetchOrder: (orderId: string) => Promise<CoordinatorOrderResponse>;
+}
+
+export function OrderStatusTimeline({ orderId, fetchOrder }: OrderStatusTimelineProps) {
+  const [state, dispatch] = useReducer(orderTimelineReducer, orderId, initialOrderTimeline);
+  const mounted = useRef(true);
+
+  useEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+    };
+  }, []);
+
+  const refresh = useCallback(
+    async (id: string) => {
+      try {
+        const order = await fetchOrder(id);
+        // Key the response by the order it describes, not by the prop at call time.
+        if (mounted.current) dispatch({ type: 'order', orderId: order.publicId, status: order.status });
+      } catch {
+        /* keep the last coordinator-confirmed state */
+      }
+    },
+    [fetchOrder]
+  );
+
+  useEffect(() => {
+    dispatch({ type: 'track', orderId });
+    void refresh(orderId);
+  }, [orderId, refresh]);
+
+  const onLocalStep = (step: OrderTimelineStep) => {
+    dispatch({ type: 'local', step });
+    void refresh(orderId);
+  };
+
+  return (
+    <section data-testid="order-status-timeline" aria-label="Order timeline">
+      <ol className="space-y-2">
+        {ORDER_TIMELINE_STEPS.map((step) => {
+          const status = state.completed.includes(step.id)
+            ? 'complete'
+            : state.pending.includes(step.id)
+              ? 'awaiting_coordinator'
+              : 'not_started';
+          return (
+            <li key={step.id} data-testid={`order-step-${step.id}`} data-status={status}>
+              <span className="text-sm text-white">{step.title}</span>{' '}
+              {status === 'complete' ? (
+                <span className="text-xs text-emerald-200">Confirmed by coordinator</span>
+              ) : status === 'awaiting_coordinator' ? (
+                <span className="text-xs text-amber-200">Waiting for coordinator</span>
+              ) : (
+                <button
+                  type="button"
+                  className="text-xs text-cyan-200 underline"
+                  onClick={() => onLocalStep(step.id)}
+                >
+                  I did this
+                </button>
+              )}
+            </li>
+          );
+        })}
+        {state.error && (
+          <li data-testid="order-step-error" data-status="error" role="alert" className="text-sm text-rose-200">
+            {state.error}
+          </li>
+        )}
       </ol>
     </section>
   );
