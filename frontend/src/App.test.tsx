@@ -85,6 +85,10 @@ vi.mock('./components/TransactionHistory', () => ({
   default: () => null,
 }));
 
+vi.mock('./components/DeploymentSelfCheck', () => ({
+  default: () => null,
+}));
+
 describe('App — Mainnet safety gates', () => {
   beforeEach(() => {
     vi.clearAllMocks();
@@ -94,7 +98,7 @@ describe('App — Mainnet safety gates', () => {
   describe('mainnet disabled (VITE_MAINNET_ENABLED unset or false)', () => {
     test('shows "Mainnet Coming" badge when mainnet is disabled', () => {
       render(<App />, { wrapper: MemoryRouter });
-      expect(screen.getByText('Mainnet Coming')).toBeInTheDocument();
+      expect(screen.getByText('Mainnet Coming')).toBeInDocument();
       expect(
         screen.getByTitle(/v2 mainnet launches after independent audit/i),
       ).toBeInTheDocument();
@@ -110,21 +114,21 @@ describe('App — Mainnet safety gates', () => {
       render(<App />, { wrapper: MemoryRouter });
       expect(
         screen.queryByText(/0xa7bcb4ea/i),
-      ).not.toBeInTheDocument();
+      ).not.toBeInDocument();
       expect(
         screen.queryByText(
           /0xa7bCb4EAc8964306F9e3764f67Db6A7af6DdF99A/i,
         ),
-      ).not.toBeInTheDocument();
+      ).not.toBeInDocument();
       expect(
         screen.queryByText(/mainnet\.infura\.io/i),
-      ).not.toBeInTheDocument();
+      ).not.toBeInDocument();
       expect(
         screen.queryByText(/ethereum-rpc\.publicnode\.com/i),
-      ).not.toBeInTheDocument();
+      ).not.toBeInDocument();
       expect(
         screen.queryByText(/v1 single-relayer bridge active/i),
-      ).not.toBeInTheDocument();
+      ).not.toBeInDocument();
     });
 
     test('Mode metric tile shows "Testnet" when mainnet is disabled', () => {
@@ -141,7 +145,7 @@ describe('App — Mainnet safety gates', () => {
 
       render(<App />, { wrapper: MemoryRouter });
 
-      expect(screen.queryByText('Mainnet Coming')).not.toBeInTheDocument();
+      expect(screen.queryByText('Mainnet Coming')).not.toBeInDocument();
       const toggle = screen.getByRole('button', { name: 'Testnet' });
       expect(toggle).toBeEnabled();
     });
