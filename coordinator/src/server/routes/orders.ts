@@ -6,11 +6,15 @@ import { encodeCursor, decodeCursor } from "./cursor-utils.js";
 import { evaluateRefundEligibility } from "../../utils/timelock-validator.js";
 
 function orderValidationResponse(err: OrderValidationError): { status: number; body: Record<string, unknown> } {
+  if (err.code === "quote_expired" || err.code === "quote_not_found" || err.code === "quote_mismatch") {
+    return { status: 400, body: { error: err.code, message: err.message } };
+  }
   if (err.code === "TIMELOCKS_REVERSED" || err.code === "GAP_TOO_SMALL") {
     return { status: 400, body: { error: "timelock_ordering_invalid", code: err.code } };
   }
   return { status: 400, body: { error: "order_validation_error", message: err.message } };
 }
+
 
 function serialiseOrder(order: OrderRow | null) {
   if (!order) return null;
@@ -173,7 +177,7 @@ export function ordersRoutes(orders: OrderService): Router {
   });
 
   // Parameterized routes come AFTER specific routes
-  router.get("/orders/:id", async (req, res, next) => {
+router.get("/orders/:id", async (req, res, next) => {
     const id = req.params.id;
     try {
       const order = await orders.get(id);
@@ -182,15 +186,6 @@ export function ordersRoutes(orders: OrderService): Router {
         return;
       }
       res.json(serialiseOrder(order));
-    } catch (err) {
-      next(err);
-    }
-  });
-
-  router.get("/orders/:id/transitions", async (req, res, next) => {
-    try {
-      const transitions = await orders.getTransitions(req.params.id);
-      res.json({ transitions });
     } catch (err) {
       next(err);
     }
