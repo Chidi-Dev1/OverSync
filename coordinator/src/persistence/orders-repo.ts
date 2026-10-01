@@ -1,5 +1,9 @@
 import { randomBytes } from "node:crypto";
 import type { Database } from "./db.js";
+import type {
+  OrderFailureCode,
+  OrderTransitionAction
+} from "../state-machine/order-machine.js";
 
 type DatabaseT = Database;
 type Statement = ReturnType<DatabaseT["prepare"]>;
@@ -94,6 +98,42 @@ export interface OrderTransitionSummary {
   txHash: string | null;
   category: string;
 }
+
+/**
+ * A transition the state machine refused. Persisted so an operator can audit
+ * who tried to move an order illegally and why the stored status did not
+ * change (issue #252).
+ */
+export interface OrderRejectedTransition {
+  from: OrderStatus;
+  /** Status the writer tried to write. */
+  to: OrderStatus;
+  action: OrderTransitionAction | null;
+  /** Stable machine-readable code — see `docs/API_ERRORS.md`. */
+  code: OrderFailureCode;
+  reason: string;
+  txHash: string | null;
+  /** Which writer refused it: `order-service`, `ethereum-listener`, … */
+  writer: string;
+  timestamp: number;
+}
+
+export interface RejectedTransitionInput {
+  publicId: string;
+  from: OrderStatus;
+  to: OrderStatus;
+  action: OrderTransitionAction | null;
+  code: OrderFailureCode;
+  reason: string;
+  txHash?: string | null;
+  writer?: string;
+}
+
+/** `order_events.event_type` used to persist refused transitions. */
+export const TRANSITION_REJECTED_EVENT = "transition_rejected";
+
+/** `order_events.event_type` used for applied transitions. */
+export const TRANSITION_SUMMARY_EVENT = "transition_summary";
 
 interface OrderEventDbRow {
   id: number;
@@ -239,8 +279,13 @@ export class OrdersRepository {
       INSERT INTO order_events (order_id, event_type, payload_json)
       VALUES (:orderId, :eventType, :payloadJson)
     `);
+    // Only applied transitions feed the public transition history — refused
+    // attempts are persisted with their own event type (see below) so they
+    // can be queried on their own without breaking existing consumers.
     this.transitionsByOrderId = db.prepare(`
-      SELECT * FROM order_events WHERE order_id = :orderId ORDER BY created_at ASC
+      SELECT * FROM order_events
+      WHERE order_id = :orderId AND event_type = :eventType
+      ORDER BY created_at ASC, id ASC
     `);
     this.updateStatus = db.prepare(`
       UPDATE orders
@@ -468,7 +513,10 @@ export class OrdersRepository {
   async getTransitions(publicId: string): Promise<OrderTransitionSummary[]> {
     const order = await this.findByPublicId(publicId);
     if (!order) return [];
-    const rows = await this.all<OrderEventDbRow>(this.transitionsByOrderId, { orderId: order.id });
+    const rows = await this.all<OrderEventDbRow>(this.transitionsByOrderId, {
+      orderId: order.id,
+      eventType: TRANSITION_SUMMARY_EVENT
+    });
     return rows.map((row) => {
       const payload = JSON.parse(row.payload_json) as {
         from: OrderStatus | null;
@@ -486,11 +534,61 @@ export class OrdersRepository {
     });
   }
 
-  async setStatus(publicId: string, status: OrderStatus): Promise<void> {
+  async setStatus(
+    publicId: string,
+    status: OrderStatus,
+    txHash: string | null = null
+  ): Promise<void> {
     const order = await this.findByPublicId(publicId);
     if (!order) throw new Error("Unknown order");
     await this.run(this.updateStatus, { publicId, status });
-    await this.recordTransition(order.id, order.status, status, null, status);
+    await this.recordTransition(order.id, order.status, status, txHash, status);
+  }
+
+  /**
+   * Persist a refused transition without touching the order row: the stored
+   * status stays exactly where it was (issue #252).
+   */
+  async recordRejectedTransition(input: RejectedTransitionInput): Promise<void> {
+    const order = await this.findByPublicId(input.publicId);
+    if (!order) throw new Error("Unknown order");
+    await this.insertEvent(order.id, TRANSITION_REJECTED_EVENT, {
+      from: input.from,
+      to: input.to,
+      action: input.action,
+      code: input.code,
+      reason: input.reason,
+      txHash: input.txHash ?? null,
+      writer: input.writer ?? "order-service"
+    });
+  }
+
+  /** Refused transitions for an order, oldest first. */
+  async getRejectedTransitions(publicId: string): Promise<OrderRejectedTransition[]> {
+    const order = await this.findByPublicId(publicId);
+    if (!order) return [];
+    const rows = await this.all<OrderEventDbRow>(this.transitionsByOrderId, {
+      orderId: order.id,
+      eventType: TRANSITION_REJECTED_EVENT
+    });
+    return rows.map((row) => {
+      const payload = JSON.parse(row.payload_json) as Partial<OrderRejectedTransition>;
+      return {
+        from: payload.from as OrderStatus,
+        to: payload.to as OrderStatus,
+        action: payload.action ?? null,
+        code: payload.code as OrderFailureCode,
+        reason: payload.reason ?? "",
+        txHash: payload.txHash ?? null,
+        writer: payload.writer ?? "order-service",
+        timestamp: Number(row.created_at)
+      };
+    });
+  }
+
+  /** Number of refused transitions recorded for an order. */
+  async countRejectedTransitions(publicId: string): Promise<number> {
+    return (await this.getRejectedTransitions(publicId)).length;
   }
 
   async recordSrcLock(input: {
@@ -546,7 +644,7 @@ export class OrdersRepository {
     txHash: string | null,
     category: string
   ): Promise<void> {
-    await this.insertEvent(orderId, "transition_summary", {
+    await this.insertEvent(orderId, TRANSITION_SUMMARY_EVENT, {
       from,
       to,
       txHash,
