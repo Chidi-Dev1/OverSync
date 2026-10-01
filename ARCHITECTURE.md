@@ -1,6 +1,6 @@
-# OverSync v2 — Architecture
+#OverSync v2 — Architecture
 
-> **Status:** OverSync is being rebuilt as a non-custodial, multi-resolver,
+>**Status:** OverSync is being rebuilt as a non-custodial, multi-resolver,
 > HTLC-based bridge between Ethereum and Stellar. This document tracks the
 > **target** architecture. Code in this repository is in the middle of the
 > v1 → v2 transition; sections that describe behaviour not yet shipped are
