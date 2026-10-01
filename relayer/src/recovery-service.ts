@@ -1,6 +1,18 @@
 /**
  * @fileoverview Recovery Service for Ethereum-Stellar Bridge
  * @description Handles timelock monitoring, auto-refund, and emergency recovery
+ *
+ * Every on-chain step here goes through the **relay submission tracker**, the
+ * same door the `/api/orders/*` handlers and the refund watchdog use. That is
+ * what makes "one claim or one refund per order" an enforced invariant rather
+ * than a convention: a second action on an order that already has a live or
+ * settled submission is refused with `RelayOrderBusyError` before anything is
+ * broadcast.
+ *
+ * The `submitter` is injected so the service can be unit tested without a live
+ * chain, and so a deployment that has not wired real recovery execution keeps
+ * the current dry-run behaviour explicitly instead of silently keeping a
+ * private door.
  */
 
 import { EventEmitter } from 'events';
@@ -9,6 +21,7 @@ import { ethereumListener } from './ethereum-listener.js';
 import FusionEventManager, { EventType } from './event-handlers.js';
 import { ActiveOrder } from './types.js';
 import { getCurrentTimestamp } from './utils.js';
+import { RelayOrderBusyError, type RelaySide } from './relay-submission-tracker.js';
 
 // Recovery status types
 export enum RecoveryStatus {
@@ -69,6 +82,25 @@ export interface RecoveryConfig {
   gracePeriod: number; // seconds after timelock
 }
 
+/** The on-chain step a recovery wants to perform, as a tracker action. */
+export type RecoveryActionKind = 'refund' | 'claim' | 'release';
+
+/** Called for every on-chain step the recovery service wants to perform. */
+export type RecoverySubmitter = (request: {
+  orderId: string;
+  side: RelaySide;
+  action: RecoveryActionKind;
+  chain: 'ethereum' | 'stellar';
+  reason: string;
+  /** The recovery's own execution. Currently a dry run. */
+  execute: () => Promise<unknown>;
+}) => Promise<unknown>;
+
+const defaultSubmitter: RecoverySubmitter = async ({ reason, orderId, action, chain, execute }) => {
+  console.log(`🧪 recovery-service (dry run): ${action} on ${chain} for ${orderId} — ${reason}`);
+  return execute();
+};
+
 export class RecoveryService extends EventEmitter {
   private ordersService: OrdersService;
   private eventManager: FusionEventManager;
@@ -76,16 +108,20 @@ export class RecoveryService extends EventEmitter {
   private recoveryRequests: Map<string, RecoveryRequest> = new Map();
   private monitoringInterval: NodeJS.Timeout | null = null;
   private stats: RecoveryStats;
+  /** The single door every recovery submission must pass through. */
+  private submitter: RecoverySubmitter;
 
   constructor(
     ordersService: OrdersService,
     eventManager: FusionEventManager,
-    config: RecoveryConfig
+    config: RecoveryConfig,
+    submitter: RecoverySubmitter = defaultSubmitter
   ) {
     super();
     this.ordersService = ordersService;
     this.eventManager = eventManager;
     this.config = config;
+    this.submitter = submitter;
     this.stats = {
       totalRecoveries: 0,
       successfulRecoveries: 0,
@@ -270,6 +306,16 @@ export class RecoveryService extends EventEmitter {
       });
 
     } catch (error) {
+      // Another action already owns this order (e.g. the claim is still in
+      // flight). That is not a failure — stay pending and let the next monitor
+      // tick re-evaluate once the tracker releases the order lock.
+      if (error instanceof RelayOrderBusyError) {
+        console.warn(`⏸ Recovery deferred: ${recoveryId} — ${error.message}`);
+        recovery.status = RecoveryStatus.Pending;
+        recovery.updatedAt = getCurrentTimestamp();
+        return;
+      }
+
       console.error(`❌ Recovery failed: ${recoveryId}`, error);
       
       recovery.status = RecoveryStatus.Failed;
@@ -298,20 +344,26 @@ export class RecoveryService extends EventEmitter {
   }
 
   /**
-   * Execute timeout refund
+   * Execute timeout refund.
+   *
+   * Exactly one leg is refunded: the side that holds the locked funds (the
+   * source chain). The previous implementation walked both chains, which under
+   * the tracker's order-level single-flight lock is a double release — exactly
+   * the bug class this service now shares a door to prevent. The destination
+   * leg is unwound by the on-chain refund path, not by a relayer payment.
    */
   private async executeTimeoutRefund(recovery: RecoveryRequest, order: ActiveOrder): Promise<void> {
     console.log(`🔄 Executing timeout refund for order ${order.orderHash}`);
-    
-    // 1. Ethereum refund
-    if (order.srcChainId === 1) { // Ethereum
-      await this.executeEthereumRefund(order);
-    }
 
-    // 2. Stellar refund
-    if (order.dstChainId === 999) { // Stellar
-      await this.executeStellarRefund(order);
-    }
+    const stellarSource = order.srcChainId === 999;
+    await this.submitRecovery({
+      recovery,
+      order,
+      action: 'refund',
+      chain: stellarSource ? 'stellar' : 'ethereum',
+      reason: 'timelock expired',
+      execute: () => (stellarSource ? this.executeStellarRefund(order) : this.executeEthereumRefund(order)),
+    });
 
     // 3. Update order status
     // This would normally update the order in the database
@@ -324,11 +376,22 @@ export class RecoveryService extends EventEmitter {
   private async executeEmergencyRefund(recovery: RecoveryRequest, order: ActiveOrder): Promise<void> {
     console.log(`🚨 Executing emergency refund for order ${order.orderHash}`);
     console.log(`Emergency reason: ${recovery.metadata.emergencyReason}`);
-    
-    // Emergency refund logic - more aggressive, bypasses normal checks
-    await this.executeEthereumEmergencyRefund(order);
-    await this.executeStellarEmergencyRefund(order);
-    
+
+    // Emergency recovery is the same single release, taken sooner. It shares the
+    // tracker's slot with the timeout path, so the two cannot both fire.
+    const stellarSource = order.srcChainId === 999;
+    await this.submitRecovery({
+      recovery,
+      order,
+      action: 'refund',
+      chain: stellarSource ? 'stellar' : 'ethereum',
+      reason: 'emergency',
+      execute: () =>
+        stellarSource
+          ? this.executeStellarEmergencyRefund(order)
+          : this.executeEthereumEmergencyRefund(order),
+    });
+
     console.log(`✅ Emergency refund completed for order ${order.orderHash}`);
   }
 
@@ -337,11 +400,22 @@ export class RecoveryService extends EventEmitter {
    */
   private async executePublicWithdrawal(recovery: RecoveryRequest, order: ActiveOrder): Promise<void> {
     console.log(`🔓 Executing public withdrawal for order ${order.orderHash}`);
-    
-    // Public withdrawal - anyone can trigger after timelock + grace period
-    await this.executePublicEthereumWithdrawal(order);
-    await this.executePublicStellarWithdrawal(order);
-    
+
+    // Permissionless withdrawal after timelock + grace period. One release per
+    // order, for the same reason as above.
+    const stellarSource = order.srcChainId === 999;
+    await this.submitRecovery({
+      recovery,
+      order,
+      action: 'release',
+      chain: stellarSource ? 'stellar' : 'ethereum',
+      reason: 'public withdrawal',
+      execute: () =>
+        stellarSource
+          ? this.executePublicStellarWithdrawal(order)
+          : this.executePublicEthereumWithdrawal(order),
+    });
+
     console.log(`✅ Public withdrawal completed for order ${order.orderHash}`);
   }
 
@@ -350,12 +424,47 @@ export class RecoveryService extends EventEmitter {
    */
   private async executeForceRecovery(recovery: RecoveryRequest, order: ActiveOrder): Promise<void> {
     console.log(`⚡ Executing force recovery for order ${order.orderHash}`);
-    
-    // Force recovery - admin override
-    await this.executeForceEthereumRecovery(order);
-    await this.executeForceeStellarRecovery(order);
-    
+
+    // Force recovery - admin override, still one release per order.
+    const stellarSource = order.srcChainId === 999;
+    await this.submitRecovery({
+      recovery,
+      order,
+      action: 'refund',
+      chain: stellarSource ? 'stellar' : 'ethereum',
+      reason: 'force recovery',
+      execute: () =>
+        stellarSource
+          ? this.executeForceeStellarRecovery(order)
+          : this.executeForceEthereumRecovery(order),
+    });
+
     console.log(`✅ Force recovery completed for order ${order.orderHash}`);
+  }
+
+  /**
+   * Route one on-chain recovery step through the shared submission door.
+   *
+   * The side is derived from the order's chain ids so a recovery for an
+   * XLM→ETH order shares its single-flight lock with the request handlers.
+   */
+  private submitRecovery(params: {
+    recovery: RecoveryRequest;
+    order: ActiveOrder;
+    action: RecoveryActionKind;
+    chain: 'ethereum' | 'stellar';
+    reason: string;
+    execute: () => Promise<unknown>;
+  }): Promise<unknown> {
+    const side: RelaySide = params.order.srcChainId === 999 ? 'eth_to_xlm' : 'xlm_to_eth';
+    return this.submitter({
+      orderId: params.order.orderHash,
+      side,
+      action: params.action,
+      chain: params.chain,
+      reason: params.reason,
+      execute: params.execute,
+    });
   }
 
   /**

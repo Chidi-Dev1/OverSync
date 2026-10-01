@@ -1,5 +1,5 @@
 import { Router } from "express";
-import { QuoteExpiredError, QuoteNotFoundError } from "../../services/quote-service.js";
+import { AmountParseError, QuoteExpiredError, QuoteNotFoundError } from "../../services/quote-service.js";
 import type { QuoteService } from "../../services/quote-service.js";
 
 export function quotesRoutes(quotes: QuoteService): Router {
@@ -11,10 +11,29 @@ export function quotesRoutes(quotes: QuoteService): Router {
    * ETH→XLM pair.  Every response carries a unique `quoteId` that
    * resolvers reference when submitting fills; `expiresAt` is the
    * deterministic deadline enforced by `assertFresh`.
+   *
+   * Optional `?amount=<base-unit integer>` binds the quote to that exact
+   * source amount; an order announced with a different `srcAmount` is
+   * then rejected. Decimal text is refused so the coordinator never
+   * re-parses (and possibly rounds) what the form already parsed.
    */
-  router.get("/quotes/eth-xlm", async (_req, res, next) => {
+  router.get("/quotes/eth-xlm", async (req, res, next) => {
     try {
-      const quote = await quotes.quoteEthXlm();
+      const rawAmount = req.query.amount;
+      if (rawAmount !== undefined && typeof rawAmount !== "string") {
+        res.status(400).json({ error: "invalid_amount", message: "amount must be a single value" });
+        return;
+      }
+      let quote;
+      try {
+        quote = await quotes.quoteEthXlm({ amountBaseUnits: rawAmount });
+      } catch (err) {
+        if (err instanceof AmountParseError) {
+          res.status(400).json({ error: "invalid_amount", message: err.message });
+          return;
+        }
+        throw err;
+      }
       res.json({
         quoteId: quote.quoteId,
         pair: quote.pair,
@@ -23,6 +42,7 @@ export function quotesRoutes(quotes: QuoteService): Router {
         source: quote.source,
         issuedAt: quote.issuedAt,
         expiresAt: quote.expiresAt,
+        amountBaseUnits: quote.amountBaseUnits ?? null,
         /** Convenience: milliseconds remaining until expiry (negative when expired). */
         freshMs: quote.expiresAt - Date.now()
       });

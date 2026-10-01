@@ -10,10 +10,36 @@ const SAFETY_DEPOSIT = ethers.parseEther("0.001");
 const AMOUNT = ethers.parseEther("0.5");
 const MIN_STAKE = ethers.parseEther("100");
 
-async function deployEscrow() {
+async function deployEscrow(registryAddress = ZERO_ADDR) {
   const HTLCEscrow = await ethers.getContractFactory("HTLCEscrow");
   // resolverRegistry = address(0) → permissionless createOrder
-  return (await HTLCEscrow.deploy(ZERO_ADDR, 0)) as unknown as HTLCEscrow;
+  return (await HTLCEscrow.deploy(registryAddress, 0)) as unknown as HTLCEscrow;
+}
+
+async function deployBoundEscrow(registry: any, resolver: any) {
+  const escrow = await deployEscrow(await registry.getAddress());
+  await registry.connect(resolver).register(ethers.parseEther("1"));
+  return escrow;
+}
+
+async function deployRegistry() {
+  const [owner] = await ethers.getSigners();
+  const Token = await ethers.getContractFactory("TestERC20");
+  const token = (await Token.deploy("ResolverStake", "RST", ethers.parseEther("1000000"))) as unknown as TestERC20;
+
+  const Registry = await ethers.getContractFactory("ResolverRegistry");
+  const registry = await Registry.deploy(
+    await token.getAddress(),
+    ethers.parseEther("1"),
+    owner.address,
+    owner.address
+  );
+
+  return { token, registry };
+}
+
+async function registerResolver(registry: any, resolver: any, stake: bigint) {
+  await registry.connect(resolver).register(stake);
 }
 
 async function deployRegistry() {
@@ -190,9 +216,75 @@ describe("HTLCEscrow v2", () => {
   });
 
   describe("claimOrder", () => {
-    it("pays beneficiary on correct sha256 preimage and pays caller the safety deposit", async () => {
-      const [sender, beneficiary, relayer] = await ethers.getSigners();
+    it("reverts when the escrow is not bound to a resolver registry", async () => {
+      const [sender, beneficiary] = await ethers.getSigners();
       const escrow = await deployEscrow();
+      const preimage = randomBytes32();
+      const hashlock = ethers.sha256(preimage);
+
+      await escrow.connect(sender).createOrder(
+        beneficiary.address,
+        sender.address,
+        ZERO_ADDR,
+        AMOUNT,
+        SAFETY_DEPOSIT,
+        hashlock,
+        TIMELOCK,
+        { value: AMOUNT + SAFETY_DEPOSIT }
+      );
+
+      await expect(
+        escrow.connect(sender).claimOrder(1, preimage)
+      ).to.be.revertedWithCustomError(escrow, "ResolverNotAuthorised");
+    });
+
+    it("claims successfully for a registered resolver on the bound registry pair", async () => {
+      const [owner, sender, beneficiary] = await ethers.getSigners();
+      const { token, registry } = await deployRegistry();
+      const stake = ethers.parseEther("1");
+
+      await token.transfer(sender.address, stake);
+      await token.connect(sender).approve(await registry.getAddress(), stake);
+      await registerResolver(registry, sender, stake);
+
+      const escrow = await deployEscrow(await registry.getAddress());
+      const preimage = randomBytes32();
+      const hashlock = ethers.sha256(preimage);
+
+      await escrow.connect(sender).createOrder(
+        beneficiary.address,
+        sender.address,
+        ZERO_ADDR,
+        AMOUNT,
+        SAFETY_DEPOSIT,
+        hashlock,
+        TIMELOCK,
+        { value: AMOUNT + SAFETY_DEPOSIT }
+      );
+
+      await expect(
+        escrow.connect(sender).claimOrder(1, preimage)
+      ).to.not.be.reverted;
+    });
+
+    it("pays beneficiary on correct sha256 preimage and pays caller the safety deposit", async () => {
+      const [owner, sender, beneficiary, relayer] = await ethers.getSigners();
+      const token = await deployToken();
+      const Registry = await ethers.getContractFactory("ResolverRegistry");
+      const registry = await Registry.deploy(
+        await token.getAddress(),
+        ethers.parseEther("1"),
+        owner.address,
+        owner.address
+      );
+      const escrow = await deployEscrow(await registry.getAddress());
+      await token.transfer(sender.address, ethers.parseEther("1"));
+      await token.connect(sender).approve(await registry.getAddress(), ethers.parseEther("1"));
+      await registerResolver(registry, sender, ethers.parseEther("1"));
+      await token.transfer(relayer.address, ethers.parseEther("1"));
+      await token.connect(relayer).approve(await registry.getAddress(), ethers.parseEther("1"));
+      await registerResolver(registry, relayer, ethers.parseEther("1"));
+
       const preimage = randomBytes32();
       const hashlock = ethers.sha256(preimage);
 
@@ -224,8 +316,22 @@ describe("HTLCEscrow v2", () => {
     });
 
     it("also accepts a keccak256 hashlock (EVM convention)", async () => {
-      const [sender, beneficiary] = await ethers.getSigners();
-      const escrow = await deployEscrow();
+      const [owner, sender, beneficiary] = await ethers.getSigners();
+      const token = await deployToken();
+      const Registry = await ethers.getContractFactory("ResolverRegistry");
+      const registry = await Registry.deploy(
+        await token.getAddress(),
+        ethers.parseEther("1"),
+        owner.address,
+        owner.address
+      );
+      const escrow = await deployEscrow(await registry.getAddress());
+      await token.transfer(sender.address, ethers.parseEther("1"));
+      await token.connect(sender).approve(await registry.getAddress(), ethers.parseEther("1"));
+      await registerResolver(registry, sender, ethers.parseEther("1"));
+      await token.transfer(beneficiary.address, ethers.parseEther("1"));
+      await token.connect(beneficiary).approve(await registry.getAddress(), ethers.parseEther("1"));
+      await registerResolver(registry, beneficiary, ethers.parseEther("1"));
       const preimage = randomBytes32();
       const hashlock = ethers.keccak256(preimage);
 
@@ -244,8 +350,22 @@ describe("HTLCEscrow v2", () => {
     });
 
     it("rejects invalid preimage", async () => {
-      const [sender, beneficiary] = await ethers.getSigners();
-      const escrow = await deployEscrow();
+      const [owner, sender, beneficiary] = await ethers.getSigners();
+      const token = await deployToken();
+      const Registry = await ethers.getContractFactory("ResolverRegistry");
+      const registry = await Registry.deploy(
+        await token.getAddress(),
+        ethers.parseEther("1"),
+        owner.address,
+        owner.address
+      );
+      const escrow = await deployEscrow(await registry.getAddress());
+      await token.transfer(sender.address, ethers.parseEther("1"));
+      await token.connect(sender).approve(await registry.getAddress(), ethers.parseEther("1"));
+      await registerResolver(registry, sender, ethers.parseEther("1"));
+      await token.transfer(beneficiary.address, ethers.parseEther("1"));
+      await token.connect(beneficiary).approve(await registry.getAddress(), ethers.parseEther("1"));
+      await registerResolver(registry, beneficiary, ethers.parseEther("1"));
       const preimage = randomBytes32();
       const hashlock = ethers.sha256(preimage);
 
@@ -267,8 +387,22 @@ describe("HTLCEscrow v2", () => {
     });
 
     it("rejects claim after expiry", async () => {
-      const [sender, beneficiary] = await ethers.getSigners();
-      const escrow = await deployEscrow();
+      const [owner, sender, beneficiary] = await ethers.getSigners();
+      const token = await deployToken();
+      const Registry = await ethers.getContractFactory("ResolverRegistry");
+      const registry = await Registry.deploy(
+        await token.getAddress(),
+        ethers.parseEther("1"),
+        owner.address,
+        owner.address
+      );
+      const escrow = await deployEscrow(await registry.getAddress());
+      await token.transfer(sender.address, ethers.parseEther("1"));
+      await token.connect(sender).approve(await registry.getAddress(), ethers.parseEther("1"));
+      await registerResolver(registry, sender, ethers.parseEther("1"));
+      await token.transfer(beneficiary.address, ethers.parseEther("1"));
+      await token.connect(beneficiary).approve(await registry.getAddress(), ethers.parseEther("1"));
+      await registerResolver(registry, beneficiary, ethers.parseEther("1"));
       const preimage = randomBytes32();
       const hashlock = ethers.sha256(preimage);
 
@@ -291,8 +425,22 @@ describe("HTLCEscrow v2", () => {
     });
 
     it("rejects double claim", async () => {
-      const [sender, beneficiary] = await ethers.getSigners();
-      const escrow = await deployEscrow();
+      const [owner, sender, beneficiary] = await ethers.getSigners();
+      const token = await deployToken();
+      const Registry = await ethers.getContractFactory("ResolverRegistry");
+      const registry = await Registry.deploy(
+        await token.getAddress(),
+        ethers.parseEther("1"),
+        owner.address,
+        owner.address
+      );
+      const escrow = await deployEscrow(await registry.getAddress());
+      await token.transfer(sender.address, ethers.parseEther("1"));
+      await token.connect(sender).approve(await registry.getAddress(), ethers.parseEther("1"));
+      await registerResolver(registry, sender, ethers.parseEther("1"));
+      await token.transfer(beneficiary.address, ethers.parseEther("1"));
+      await token.connect(beneficiary).approve(await registry.getAddress(), ethers.parseEther("1"));
+      await registerResolver(registry, beneficiary, ethers.parseEther("1"));
       const preimage = randomBytes32();
       const hashlock = ethers.sha256(preimage);
 
@@ -365,8 +513,22 @@ describe("HTLCEscrow v2", () => {
     });
 
     it("rejects refund after a successful claim", async () => {
-      const [sender, beneficiary, cleaner] = await ethers.getSigners();
-      const escrow = await deployEscrow();
+      const [owner, sender, beneficiary, cleaner] = await ethers.getSigners();
+      const token = await deployToken();
+      const Registry = await ethers.getContractFactory("ResolverRegistry");
+      const registry = await Registry.deploy(
+        await token.getAddress(),
+        ethers.parseEther("1"),
+        owner.address,
+        owner.address
+      );
+      const escrow = await deployEscrow(await registry.getAddress());
+      await token.transfer(sender.address, ethers.parseEther("1"));
+      await token.connect(sender).approve(await registry.getAddress(), ethers.parseEther("1"));
+      await registerResolver(registry, sender, ethers.parseEther("1"));
+      await token.transfer(beneficiary.address, ethers.parseEther("1"));
+      await token.connect(beneficiary).approve(await registry.getAddress(), ethers.parseEther("1"));
+      await registerResolver(registry, beneficiary, ethers.parseEther("1"));
       const preimage = randomBytes32();
       const hashlock = ethers.sha256(preimage);
 

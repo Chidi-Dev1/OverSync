@@ -186,6 +186,14 @@ contract HTLCEscrow is IHTLCEscrow, ReentrancyGuard {
         if (order.status != OrderStatus.Funded) revert OrderNotClaimable();
         if (block.timestamp > order.timelock) revert Expired();
 
+        // A claim must be submitted by a resolver that is still active on the
+        // registry bound at deployment time. If the factory failed to wire the
+        // registry, or a manual escrow skipped that wiring, this reverts instead
+        // of trusting a mismatched registry state.
+        if (address(resolverRegistry) == address(0) || !resolverRegistry.isActive(msg.sender)) {
+            revert ResolverNotAuthorised();
+        }
+
         // Verify hashlock. We accept both sha256 and keccak256 digests
         // so that a Soroban-side counterpart (sha256) and a classic EVM
         // counterparty (keccak256) can share the same on-chain hashlock.

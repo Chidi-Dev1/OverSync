@@ -54,6 +54,12 @@ jobs:
       - name: Typecheck — frontend
         run: pnpm --filter @oversync/frontend exec tsc --noEmit
 
+      - name: Typecheck — relayer
+        run: pnpm --filter @oversync/relayer exec tsc --noEmit
+
+      - name: Lint — relayer
+        run: pnpm --filter @oversync/relayer lint
+
       - name: Test — SDK
         run: pnpm --filter @oversync/sdk test
 
@@ -125,6 +131,20 @@ jobs:
             ~/.cargo/git
             soroban/target
           key: soroban-${{ runner.os }}-${{ hashFiles('soroban/Cargo.toml', 'soroban/contracts/**/Cargo.toml') }}
+
+      - name: Install cargo-binstall
+        uses: cargo-bins/cargo-binstall@main
+
+      - name: Install Stellar CLI
+        run: |
+          cargo binstall -y stellar-cli --version 22.8.1
+          stellar --version
+      - name: Who needs ed25519-dalek 3.0.0
+        run: cargo tree -i ed25519-dalek@3.0.0
+        continue-on-error: true
+
+      - name: Pin ed25519-dalek to 2.x
+        run: cargo update -p ed25519-dalek@3.0.0 --precise 2.2.0
 
       - name: Build WASM
         run: stellar contract build

@@ -208,7 +208,14 @@ contract HTLCBridge is ReentrancyGuard, Ownable {
     // CONSTRUCTOR
     // ═══════════════════════════════════════════════════════════════════════════════════════
     
+    /// @dev When this is set to another contract, new locks on this legacy bridge revert.
+    address public activeV2Escrow;
+
     constructor() Ownable(msg.sender) {}
+
+    function setActiveV2Escrow(address escrow) external onlyOwner {
+        activeV2Escrow = escrow;
+    }
     
     // ═══════════════════════════════════════════════════════════════════════════════════════
     // EXTERNAL FUNCTIONS
@@ -240,6 +247,10 @@ contract HTLCBridge is ReentrancyGuard, Ownable {
         bytes32 stellarTxHash,
         bool partialFillEnabled
     ) external payable nonReentrant returns (uint256 orderId) {
+        if (activeV2Escrow != address(0) && activeV2Escrow != address(this)) {
+            revert("legacy lock refused");
+        }
+
         // Input validation
         // Note: token can be address(0) for ETH transactions
         require(amount > 0, "Amount must be > 0");
