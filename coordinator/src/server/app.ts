@@ -29,6 +29,7 @@ export function createApp(deps: AppDeps): Express {
   app.use(pinoHttp({ logger: deps.log }));
   app.use(express.json({ limit: maxRequestBodyBytes }));
   app.use(createCorsMiddleware(deps.corsOrigins));
+  app.use(publicResponseRedaction);
 
   // Prometheus HTTP duration instrumentation
   app.use((req, res, next) => {

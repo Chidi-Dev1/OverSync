@@ -33,6 +33,19 @@ export function secretsRoutes(secrets: SecretService, options: SecretsRoutesOpti
         res.status(400).json({ error: "validation_error", details: err.errors });
         return;
       }
+      // The state machine refused the reveal: the order is not escrowed yet,
+      // or it has already moved past the secret step (#252).
+      if (isTransitionRejection(err)) {
+        res.status(409).json({
+          error: "illegal_transition",
+          code: err.code,
+          from: err.from,
+          to: err.to,
+          action: err.action,
+          message: err.message
+        });
+        return;
+      }
       if (err instanceof Error) {
         res.status(400).json({ error: "secret_error", message: err.message });
         return;
