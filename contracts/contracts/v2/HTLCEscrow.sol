@@ -175,14 +175,24 @@ contract HTLCEscrow is IHTLCEscrow, ReentrancyGuard {
     /// @inheritdoc IHTLCEscrow
     function claimOrder(uint256 orderId, bytes memory preimage) external nonReentrant {
         Order storage order = _orders[orderId];
-        if (order.status != OrderStatus.Funded) {
-            // Either non-existent or already finalised; both look the same to the caller.
-            // Suppress incorrect-equality: Safe because we check order.amount == 0 to verify the existence of the mapping entry.
-            // slither-disable-next-line incorrect-equality
-            if (order.amount == 0) revert OrderNotFound();
-            revert OrderNotClaimable();
-        }
+        // `amount` is a safe existence sentinel: createOrder rejects zero
+        // amounts, so an unset entry always has amount == 0. Checking it
+        // first keeps an unknown id from being mistaken for a Funded
+        // order (OrderStatus.Funded is the zero value) — the same reason
+        // the Soroban contract panics with OrderNotFound.
+        // Suppress incorrect-equality: Safe because amount == 0 is only true for unset entries.
+        // slither-disable-next-line incorrect-equality
+        if (order.amount == 0) revert OrderNotFound();
+        if (order.status != OrderStatus.Funded) revert OrderNotClaimable();
         if (block.timestamp > order.timelock) revert Expired();
+
+        // A claim must be submitted by a resolver that is still active on the
+        // registry bound at deployment time. If the factory failed to wire the
+        // registry, or a manual escrow skipped that wiring, this reverts instead
+        // of trusting a mismatched registry state.
+        if (address(resolverRegistry) == address(0) || !resolverRegistry.isActive(msg.sender)) {
+            revert ResolverNotAuthorised();
+        }
 
         // Verify hashlock. We accept both sha256 and keccak256 digests
         // so that a Soroban-side counterpart (sha256) and a classic EVM
@@ -211,12 +221,12 @@ contract HTLCEscrow is IHTLCEscrow, ReentrancyGuard {
     /// @inheritdoc IHTLCEscrow
     function refundOrder(uint256 orderId) external nonReentrant {
         Order storage order = _orders[orderId];
-        if (order.status != OrderStatus.Funded) {
-            // Suppress incorrect-equality: Safe because we check order.amount == 0 to verify the existence of the mapping entry.
-            // slither-disable-next-line incorrect-equality
-            if (order.amount == 0) revert OrderNotFound();
-            revert OrderNotRefundable();
-        }
+        // See claimOrder: `amount == 0` identifies an unset entry so an
+        // unknown id cannot slip through as a no-op refund.
+        // Suppress incorrect-equality: Safe because amount == 0 is only true for unset entries.
+        // slither-disable-next-line incorrect-equality
+        if (order.amount == 0) revert OrderNotFound();
+        if (order.status != OrderStatus.Funded) revert OrderNotRefundable();
         if (block.timestamp <= order.timelock) revert NotExpired();
 
         order.status = OrderStatus.Refunded;
@@ -257,9 +267,8 @@ contract HTLCEscrow is IHTLCEscrow, ReentrancyGuard {
     // Internals
     // ---------------------------------------------------------------
 
-    /// @dev Suppress arbitrary-send-eth and low-level-calls: Safe because _payout only transfers native ETH to the validated beneficiary or refundAddress stored in the order structure.
-    // slither-disable-next-line arbitrary-send-eth
-    // slither-disable-next-line low-level-calls
+    /// @dev Suppress low-level-calls and arbitrary-send-eth: Safe because _payout only transfers native ETH to the validated beneficiary or refundAddress stored in the order structure. Slither anchors both findings to the function signature, so the single comma-separated suppression must be the line immediately above it.
+    // slither-disable-next-line low-level-calls,arbitrary-send-eth
     function _payout(address token, address to, uint256 amount) private {
         if (token == address(0)) {
             // Native ETH transfer.

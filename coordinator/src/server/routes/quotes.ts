@@ -21,6 +21,11 @@ export function quotesRoutes(quotes: QuoteService): Router {
    * ETH→XLM pair.  Every response carries a unique `quoteId` that
    * resolvers reference when submitting fills; `expiresAt` is the
    * deterministic deadline enforced by `assertFresh`.
+   *
+   * Optional `?amount=<base-unit integer>` binds the quote to that exact
+   * source amount; an order announced with a different `srcAmount` is
+   * then rejected. Decimal text is refused so the coordinator never
+   * re-parses (and possibly rounds) what the form already parsed.
    */
   router.get("/quotes/eth-xlm", async (req, res, next) => {
     try {
@@ -40,6 +45,7 @@ export function quotesRoutes(quotes: QuoteService): Router {
         source: quote.source,
         issuedAt: quote.issuedAt,
         expiresAt: quote.expiresAt,
+        amountBaseUnits: quote.amountBaseUnits ?? null,
         /** Convenience: milliseconds remaining until expiry (negative when expired). */
         freshMs: quote.expiresAt - Date.now()
       });
