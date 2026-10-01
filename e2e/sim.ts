@@ -8,12 +8,11 @@ export type OrderStatus = "Funded" | "Claimed" | "Refunded";
 export interface CreateOrderInput {
   hashlock: Hex;
   timelockSeconds: number;
-  /** Escrowed amount locked by the maker. Defaults to DEFAULT_ESCROW_AMOUNT. */
-  amount?: bigint;
-  /** Party that funds the order and receives it back on refund. */
-  maker?: string;
-  /** Party that receives the escrow on a successful claim. */
-  recipient?: string;
+  /**
+   * Address attempting the create. Required only when the registry gate
+   * is enabled; used to look the sender up in the active-resolver set.
+   */
+  sender?: string;
 }
 
 export interface OrderView {
@@ -53,7 +52,8 @@ export type SimErrorCode =
   | "OrderNotRefundable"
   | "InvalidPreimage"
   | "Expired"
-  | "NotExpired";
+  | "NotExpired"
+  | "ResolverNotAuthorised";
 
 export class SimError extends Error {
   constructor(public readonly code: SimErrorCode) {
@@ -69,12 +69,13 @@ export interface HtlcSim {
   refundOrder(id: bigint): void;
   getOrder(id: bigint): OrderView;
   advanceTime(seconds: number): void;
-  /** Balance currently held by a party (maker/recipient) on this fixture. */
-  getBalance(party: string): bigint;
-  /** Escrow still locked against a specific order (0 once released). */
-  getEscrowBalanceFor(id: bigint): bigint;
-  /** Total escrow still locked across all orders on this fixture. */
-  getEscrowBalance(): bigint;
+  /**
+   * Mirrors `HTLCEscrow`'s optional `ResolverRegistry`: when enabled,
+   * only an active resolver may create an order. Claim and refund stay
+   * permissionless regardless of registry state.
+   */
+  setRegistryEnabled(enabled: boolean): void;
+  setResolverActive(resolver: string, active: boolean): void;
 }
 
 // Mirrors the [MIN_TIMELOCK, MAX_TIMELOCK] bounds enforced by both
@@ -90,6 +91,8 @@ abstract class BaseHtlcSim {
   protected readonly balances = new Map<string, bigint>();
   protected nextId = 1n;
   protected now: number;
+  private registryEnabled = false;
+  private readonly activeResolvers = new Set<string>();
 
   constructor() {
     this.now = Math.floor(Date.now() / 1000);
@@ -99,12 +102,27 @@ abstract class BaseHtlcSim {
     this.now += seconds;
   }
 
+  setRegistryEnabled(enabled: boolean): void {
+    this.registryEnabled = enabled;
+  }
+
+  setResolverActive(resolver: string, active: boolean): void {
+    if (active) this.activeResolvers.add(resolver.toLowerCase());
+    else this.activeResolvers.delete(resolver.toLowerCase());
+  }
+
   createOrder(input: CreateOrderInput): bigint {
     if (!/^0x[0-9a-fA-F]{64}$/.test(input.hashlock) || /^0x0+$/.test(input.hashlock)) {
       throw new SimError("InvalidHashlock");
     }
     if (input.timelockSeconds < MIN_TIMELOCK || input.timelockSeconds > MAX_TIMELOCK) {
       throw new SimError("InvalidTimelock");
+    }
+    if (this.registryEnabled) {
+      const sender = input.sender?.toLowerCase();
+      if (!sender || !this.activeResolvers.has(sender)) {
+        throw new SimError("ResolverNotAuthorised");
+      }
     }
     const id = this.nextId++;
     const amount = input.amount ?? DEFAULT_ESCROW_AMOUNT;

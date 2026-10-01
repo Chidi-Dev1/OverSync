@@ -287,8 +287,10 @@ export class OrderService {
     const order = await this.repo.findByPublicId(publicId);
     if (!order) throw new OrderValidationError(`unknown order ${publicId}`);
     if (order.status === "secret_revealed") {
-      // The preimage is bound to the hashlock, so the same secret seen again
-      // (another tx, a replayed log) is a duplicate; the first tx is kept.
+      // Re-revealing the same secret for the same order is idempotent: the
+      // observing transaction can legitimately differ (retries, multiple
+      // claim paths) while the secret itself is unchanged. Only a different
+      // preimage is a genuinely conflicting event.
       if (order.preimage === preimage) return;
       throw new StaleOrderEventError(`conflicting secret event for ${publicId}`);
     }
