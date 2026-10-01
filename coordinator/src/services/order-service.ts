@@ -34,3 +34,24 @@ export class OrderService {
     };
   }
 }
+
+export class LegacyLockError extends Error {
+  constructor() {
+    super("legacy lock refused");
+    this.name = "LegacyLockError";
+  }
+}
+
+/** Use the v2 escrow when it is configured. A legacy-bridge target builds nothing. */
+export function resolveLockTarget(input: {
+  v2Escrow?: string | null;
+  requestedTarget: string;
+  legacyBridge: string;
+}): { target: string } {
+  const v2 = (input.v2Escrow ?? "").trim();
+  if (!v2) return { target: input.requestedTarget };
+  if (input.requestedTarget.toLowerCase() === input.legacyBridge.toLowerCase()) {
+    throw new LegacyLockError();
+  }
+  return { target: v2 };
+}

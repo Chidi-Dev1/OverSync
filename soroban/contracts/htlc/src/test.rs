@@ -562,6 +562,140 @@ fn clear_resolver_registry_restores_permissionless_create_order() {
 }
 
 // ---------------------------------------------------------------------
+// Shared authorization matrix (parity with the v2 Solidity escrow)
+//
+// The EVM `HTLCEscrow` and this contract are two halves of one bridge,
+// so every claim/refund reason must match on both. These cases mirror
+// `e2e/parity.test.ts`; see docs/HTLC_AUTHORIZATION_MATRIX.md.
+// ---------------------------------------------------------------------
+
+#[test]
+fn second_refund_fails() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let asset_admin = Address::generate(&env);
+    let (asset, sac, _token) = deploy_token(&env, &asset_admin);
+    let (_admin, htlc) = setup(&env, 0);
+
+    let sender = Address::generate(&env);
+    let beneficiary = Address::generate(&env);
+    let cleaner = Address::generate(&env);
+    sac.mint(&sender, &100_0000000);
+
+    let preimage = Bytes::from_array(&env, &[31u8; 32]);
+    let hashlock = sha256_32(&env, &preimage);
+    let order_id = htlc.create_order(
+        &sender, &beneficiary, &sender, &asset,
+        &10_0000000i128, &0i128, &hashlock, &600u64,
+    );
+
+    advance_ledger(&env, 601);
+    htlc.refund_order(&order_id, &cleaner);
+
+    // Second refund must revert with the same class as the EVM escrow.
+    let res = htlc.try_refund_order(&order_id, &cleaner);
+    assert_eq!(res.err().unwrap().unwrap(), Error::OrderNotRefundable.into());
+}
+
+#[test]
+fn claim_unknown_order_fails_not_found() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (_admin, htlc) = setup(&env, 0);
+
+    let caller = Address::generate(&env);
+    let preimage = Bytes::from_array(&env, &[32u8; 32]);
+    let res = htlc.try_claim_order(&999u64, &preimage, &caller);
+    assert_eq!(res.err().unwrap().unwrap(), Error::OrderNotFound.into());
+}
+
+#[test]
+fn refund_unknown_order_fails_not_found() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (_admin, htlc) = setup(&env, 0);
+
+    let caller = Address::generate(&env);
+    let res = htlc.try_refund_order(&999u64, &caller);
+    assert_eq!(res.err().unwrap().unwrap(), Error::OrderNotFound.into());
+}
+
+#[test]
+fn claim_by_unregistered_caller_succeeds_when_registry_configured() {
+    // Mirror of row 13: the registry gates creation only, so a caller
+    // that is not an active resolver may still reveal the preimage.
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let asset_admin = Address::generate(&env);
+    let (asset, sac, token) = deploy_token(&env, &asset_admin);
+    let (_admin, htlc) = setup(&env, 0);
+
+    let (registry_id, registry, min_stake) = setup_registry(&env, &asset);
+    htlc.set_resolver_registry(&registry_id);
+
+    let resolver = Address::generate(&env);
+    let beneficiary = Address::generate(&env);
+    sac.mint(&resolver, &(min_stake + 500_0000000));
+    registry.register(&resolver, &min_stake);
+
+    let preimage = Bytes::from_array(&env, &[34u8; 32]);
+    let hashlock = sha256_32(&env, &preimage);
+    let amount = 100_0000000i128;
+    let order_id = htlc.create_order(
+        &resolver, &beneficiary, &resolver, &asset,
+        &amount, &0i128, &hashlock, &600u64,
+    );
+
+    let stranger = Address::generate(&env);
+    htlc.claim_order(&order_id, &preimage, &stranger);
+
+    assert_eq!(token.balance(&beneficiary), amount);
+    let order: Order = htlc.get_order(&order_id).unwrap();
+    assert_eq!(order.status, OrderStatus::Claimed);
+}
+
+#[test]
+fn refund_by_unregistered_caller_succeeds_when_registry_configured() {
+    // The registry gates order *creation* only. Refund must stay
+    // permissionless even for a caller that is not an active resolver,
+    // exactly as in the v2 Solidity escrow.
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let asset_admin = Address::generate(&env);
+    let (asset, sac, token) = deploy_token(&env, &asset_admin);
+    let (_admin, htlc) = setup(&env, 0);
+
+    let (registry_id, registry, min_stake) = setup_registry(&env, &asset);
+    htlc.set_resolver_registry(&registry_id);
+
+    let resolver = Address::generate(&env);
+    let beneficiary = Address::generate(&env);
+    sac.mint(&resolver, &(min_stake + 500_0000000));
+    registry.register(&resolver, &min_stake);
+
+    let preimage = Bytes::from_array(&env, &[33u8; 32]);
+    let hashlock = sha256_32(&env, &preimage);
+    let amount = 100_0000000i128;
+    let order_id = htlc.create_order(
+        &resolver, &beneficiary, &resolver, &asset,
+        &amount, &0i128, &hashlock, &600u64,
+    );
+
+    // `stranger` never registered; it can still trigger the refund.
+    let stranger = Address::generate(&env);
+    let before = token.balance(&resolver);
+    advance_ledger(&env, 601);
+    htlc.refund_order(&order_id, &stranger);
+
+    // Locked amount returns to the refund address (the resolver).
+    assert_eq!(token.balance(&resolver), before + amount);
+    let order: Order = htlc.get_order(&order_id).unwrap();
+    assert_eq!(order.status, OrderStatus::Refunded);
+}
+
+// ---------------------------------------------------------------------
 // Storage TTL tests
 // ---------------------------------------------------------------------
 
