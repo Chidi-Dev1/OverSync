@@ -4,6 +4,7 @@ import type { OrderRow, OrderSnapshot } from "../../persistence/orders-repo.js";
 import { announceSchema, OrderService, OrderValidationError } from "../../services/order-service.js";
 import { isTransitionRejection } from "../../services/order-service.js";
 import { encodeCursor, decodeCursor } from "./cursor-utils.js";
+import { evaluateRefundEligibility } from "../../utils/timelock-validator.js";
 
 function orderValidationResponse(err: OrderValidationError): { status: number; body: Record<string, unknown> } {
   // A refused lifecycle edge is a conflict with the stored order, not a bad
@@ -27,6 +28,7 @@ function orderValidationResponse(err: OrderValidationError): { status: number; b
   }
   return { status: 400, body: { error: "order_validation_error", message: err.message } };
 }
+
 
 function serialiseOrder(order: OrderRow | null) {
   if (!order) return null;
@@ -189,8 +191,26 @@ export function ordersRoutes(orders: OrderService): Router {
     }
   });
 
+  router.get("/orders/:id/refund-eligibility", async (req, res, next) => {
+    try {
+      const order = await orders.get(req.params.id);
+      if (!order) {
+        res.status(404).json({ error: "not_found" });
+        return;
+      }
+
+      const timelocks = {
+        ethereum: order.srcChain === "ethereum" ? order.srcTimelock : order.dstTimelock,
+        stellar: order.srcChain === "stellar" ? order.srcTimelock : order.dstTimelock
+      };
+      res.json(evaluateRefundEligibility(timelocks, Math.floor(Date.now() / 1000)));
+    } catch (err) {
+      next(err);
+    }
+  });
+
   // Parameterized routes come AFTER specific routes
-  router.get("/orders/:id", async (req, res, next) => {
+router.get("/orders/:id", async (req, res, next) => {
     const id = req.params.id;
     try {
       const order = await orders.get(id);

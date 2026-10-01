@@ -193,37 +193,17 @@ interface AdvanceRequest {
 }
 
 export class OrderService {
-  private readonly minGapSeconds: number;
+  private config: ConfigService;
 
-  constructor(
-    private readonly repo: OrdersRepository,
-    private readonly log: Logger,
-    /** Optional — when supplied, quoteId in announce requests is validated. */
-    private readonly quoteService?: QuoteService,
-    config?: ReturnType<typeof loadConfig>
-  ) {
-    this.minGapSeconds = config?.timelockSafetyGapSeconds ?? 600;
+  constructor(config: ConfigService) {
+    this.config = config;
   }
 
-  /**
-   * Record a new order announcement. The coordinator does NOT lock any
-   * funds — it simply records the intent so the order book is visible
-   * to all resolvers and the user can later attach the on-chain
-   * `srcOrderId` once they have locked.
-   *
-   * When `quoteId` is present in the input, it is validated against
-   * the QuoteService before the order is persisted.  Expired or
-   * unknown quoteIds are rejected as `OrderValidationError` so the
-   * error surfaces cleanly to the caller before any chain action is
-   * attempted.
-   */
-  async announce(input: AnnounceInput): Promise<OrderRow> {
-    validateChainAddress(input.srcChain, input.srcAddress);
-    validateChainAddress(input.dstChain, input.dstAddress);
-    validateDirectionAgainstChains(input);
+  async buildLockOrder(request: LockRequest): Promise<any> {
+    const activeV2Escrow = this.config.getActiveV2Escrow();
 
-    if (input.hashlock.toLowerCase() === ZERO_HASHLOCK.toLowerCase()) {
-      throw new OrderValidationError("hashlock must not be all zeros");
+    if (activeV2Escrow && activeV2Escrow.toLowerCase() !== request.target.toLowerCase()) {
+      throw new Error("Legacy bridge lock rejected: v2 escrow active");
     }
 
     const hashlock = input.hashlock.toLowerCase() as `0x${string}`;
@@ -235,7 +215,13 @@ export class OrderService {
         this.log.debug({ quoteId: input.quoteId }, "quoteId supplied but no QuoteService wired; skipping freshness check");
       } else {
         try {
-          this.quoteService.assertFresh(input.quoteId);
+          this.quoteService.bindOrderTerms(input.quoteId, {
+            fromAsset: input.srcAsset,
+            toAsset: input.dstAsset,
+            amount: input.srcAmount,
+            fromNetwork: input.srcChain,
+            toNetwork: input.dstChain
+          });
           this.log.debug({ quoteId: input.quoteId }, "quote freshness confirmed");
         } catch (err) {
           if (err instanceof QuoteExpiredError || err instanceof QuoteNotFoundError) {
@@ -594,4 +580,25 @@ export class OrderService {
     );
     ordersTotal.inc({ status: to });
   }
+}
+
+export class LegacyLockError extends Error {
+  constructor() {
+    super("legacy lock refused");
+    this.name = "LegacyLockError";
+  }
+}
+
+/** Use the v2 escrow when it is configured. A legacy-bridge target builds nothing. */
+export function resolveLockTarget(input: {
+  v2Escrow?: string | null;
+  requestedTarget: string;
+  legacyBridge: string;
+}): { target: string } {
+  const v2 = (input.v2Escrow ?? "").trim();
+  if (!v2) return { target: input.requestedTarget };
+  if (input.requestedTarget.toLowerCase() === input.legacyBridge.toLowerCase()) {
+    throw new LegacyLockError();
+  }
+  return { target: v2 };
 }

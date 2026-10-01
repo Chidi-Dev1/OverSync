@@ -17,6 +17,8 @@ export class SorobanListener {
   private readonly log: Logger;
   private readonly applier: OrderEventApplier;
   private cursor: string | undefined;
+  private resumeLedger: number | undefined;
+  private lastLedger = 0;
   private stopped = false;
 
   constructor(
@@ -31,13 +33,25 @@ export class SorobanListener {
     });
   }
 
-  start(): void {
+  private get networkId(): string {
+    return this.cfg.soroban.networkPassphrase;
+  }
+
+  /** Throws CursorMismatchError when the saved cursor belongs to another network. */
+  async start(): Promise<void> {
     if (!this.cfg.soroban.htlcContract) {
       this.log.warn("SOROBAN_HTLC contract not configured — Soroban listener disabled");
       return;
     }
     const contractId = this.cfg.soroban.htlcContract;
     this.log.info({ contract: contractId }, "starting");
+    if (this.events) {
+      const saved = await this.events.resume("soroban", this.networkId);
+      if (saved) {
+        this.cursor = saved.cursor ?? undefined;
+        this.resumeLedger = saved.cursor ? undefined : saved.position;
+      }
+    }
     void this.loop(contractId);
   }
 
@@ -50,7 +64,8 @@ export class SorobanListener {
       try {
         const latest = await this.server.getLatestLedger();
         listenerLastBlock.set({ chain: "soroban" }, latest.sequence);
-        const startLedger = this.cursor === undefined ? latest.sequence - 1 : undefined;
+        const startLedger =
+          this.cursor === undefined ? this.resumeLedger ?? latest.sequence - 1 : undefined;
         const events = await this.server.getEvents({
           filters: [{ type: "contract", contractIds: [contractId] }],
           startLedger: startLedger,
@@ -75,6 +90,16 @@ export class SorobanListener {
           this.applier.logOutcome(decoded, outcome);
         }
         if (events.cursor) this.cursor = events.cursor;
+        this.resumeLedger = undefined;
+        if (this.events) {
+          // Persist only after the batch was handled above.
+          await this.events.advance(
+            "soroban",
+            this.networkId,
+            Math.max(this.lastLedger, latest.sequence),
+            this.cursor ?? null
+          );
+        }
       } catch (err) {
         this.log.warn({ err }, "Soroban poll failed");
       }
